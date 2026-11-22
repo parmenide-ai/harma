@@ -14,17 +14,20 @@ Every command takes `--json`. Targets are `harness:model` (for example `claude:c
 | `select --open [--wait] [--timeout s]` | Selection screen in a focused herdr tab (or `hc` terminal); `--wait` returns the saved choices (default 900 s) |
 | `select --set "job=h:m@e\|h:m@e,job=none"` | Record the user's choices; `\|` separates models in order of preference; the orchestrator takes one model; at most 5 per job |
 | `select --accept` / `select --show` | Accept all proposals (only if the user said so) / print choices |
-| `dispatch --name n (--model h:m [--effort e] \| --task-type job) [--prompt "…" \| --prompt-file f] [--cwd dir] [--layout auto\|workspace\|tab\|split[:right\|:down]] [--worktree [--branch b]] [--headless [--max-time s]] [--machine m --cwd dir] [--wait] [--timeout s] [--yes]` | Start an agent and send the task; `--headless`: one task, one answer; `--machine`: on another machine's herdr |
+| `dispatch --name n (--model h:m [--effort e] \| --task-type job) [--prompt "…" \| --prompt-file f] [--cwd dir] [--layout auto\|workspace\|tab\|split[:right\|:down]] [--worktree [--branch b]] [--headless [--max-time s]] [--machine m --cwd dir] [--keep] [--wait] [--timeout s] [--yes]` | Start an agent and send the task, checking that it arrived; `--headless`: one task, one answer; `--machine`: on another machine's herdr; `--keep`: cleanup leaves it open until named |
 | `trust [off\|worktrees\|on]` | Show or set who answers folder-trust dialogs (default `worktrees`); change it only on the user's request |
 | `worktree [--copy ".env,…"]` | Show or set the untracked files copied into each new worktree; set it only on the user's request |
 | `answers [off\|questions\|permissions\|all]` | Show or set how far you may answer waiting agents (default `permissions`); change it only on the user's request |
-| `send n "text" [--wait] [--timeout s] [--yes]` | More work for an open interactive agent (refused for a headless job) |
+| `send n "text" [--wait] [--timeout s] [--yes]` | More work for an open interactive agent (refused for a headless job), checking that it arrived |
+| `send n --pending` | Deliver the task harma kept aside; no new `--yes` |
+| `wait [n…] [--any] [--timeout s]` | Wait until the agents stop (default: all open, 540 s); delivers tasks kept aside; exit 4 when one waits on a question, 5 when time runs out |
 | `read n [--lines N]` | Recent screen output of an agent; for a headless job, its answer |
 | `answer n --kind question\|permission (--option "text or number" [--text "…"] \| --text "…" \| --keys "down,enter") [--reason "…"] [--yes]` | Answer an agent that waits on a question or a permission; harma checks the selected option on screen before Enter |
-| `status [--all]` | Open agents (all with `--all`): model, effort, live state, age, session id |
+| `status [--all]` | Open agents (all with `--all`): model, effort, live state, `compito` (task delivered, `NON consegnato`, or `nessuno`), `tenuto`, age, session id |
 | `costs` | Estimated cost per agent, credits per provider, `advice` |
-| `cleanup [--dry-run] [--agent n] [--force] [--workspace]` | Save session ids, close finished agents |
-| `resume n [--print-only] [--yes]` | Reopen a closed agent's session (Claude Code and Codex) |
+| `cleanup [--dry-run] [--agent n] [--force] [--workspace]` | Save session ids, close finished agents; skips agents marked with `keep` unless named |
+| `keep n [--off]` | Mark an agent so that cleanup leaves it open until named; `--off` removes the mark |
+| `resume n [--print-only] [--yes]` | Reopen a closed agent's session (Claude Code, Codex and Muse) |
 | `doctor` | Check the environment |
 
 Jobs: `pianificazione` (planning), `sviluppo` (development), `review`, `debugging`, `ricerca` (research), `estrazione` (extraction). English aliases are accepted.
@@ -34,7 +37,8 @@ Jobs: `pianificazione` (planning), `sviluppo` (development), `review`, `debuggin
 - `0`: done
 - `1`: error; the message has a hint
 - `3`: needs the user's confirmation; nothing started or answered. Show the plan or the answer, ask, rerun with `--yes`
-- `4`: the agent waits on a dialog: `dispatch` started it but the task wasn't sent, `send` wasn't delivered, or `answer` found no option to pick (see troubleshooting.md)
+- `4`: an agent needs you: it waits on a dialog (`dispatch` or `send` kept the task aside, or `wait` stopped), the task didn't reach it even when sent twice, or `answer` found no option to pick (see troubleshooting.md)
+- `5`: `wait` ran out of time while agents still work; run it again
 
 ## Credit states
 
@@ -49,5 +53,6 @@ In the user's order: skip a model whose CLI isn't installed or whose credits are
 - **herdr**: inside herdr, a pane beside the orchestrator while there is room, then a tab; outside, one workspace per project (`harma:<project>`); headless jobs show up as agents named after the job
 - **herdr-core (`hc`)**: headless terminals labelled `harma.project` and `harma.agent`; the user opens one with `hc attach <name>`
 - **`.harma/config.json`**: orchestrator, backend, policy, budgets, thresholds, routing overrides, `roster` (the user's models per job)
-- **`.harma/agents.jsonl`**: append-only events (started, session, prompted, blocked, answered, closed, resumed, roster)
+- **`.harma/agents.jsonl`**: append-only events (started, session, prompted, pending, blocked, answered, keep, closed, resumed, roster)
+- **`.harma/prompts/`**: tasks kept aside until they reach their agent
 - **`.harma/cache/`**: last inventory, credits, rank, selection status

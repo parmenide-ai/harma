@@ -22,6 +22,18 @@ import { selectedOption, pickOption } from './answers.mjs';
 
 const MAX_OPTIONS = 15; // a choice list longer than this is not a dialog harma walks
 
+/**
+ * Does the screen show this task? Its first line, spaces ignored (the
+ * terminal wraps it), or the placeholder a TUI shows for a long paste.
+ */
+export function showsTask(screen, text) {
+  const flat = String(screen ?? '').replace(/\s+/g, '');
+  if (/\[Pastedtext/i.test(flat)) return true;
+  const first = String(text).split('\n').find((l) => l.trim()) ?? '';
+  const probe = first.replace(/\s+/g, '').slice(0, 40);
+  return probe.length > 0 && flat.includes(probe);
+}
+
 export function projectId(root) {
   return `${basename(root).toLowerCase().replace(/[^a-z0-9_-]/g, '-').slice(0, 20)}-${createHash('sha1').update(root).digest('hex').slice(0, 6)}`;
 }
@@ -63,6 +75,8 @@ export class HerdrBackend {
     this.trustPollMs = 500;
     this.shellWaitMs = 20_000; // a new pane's shell may still be starting: retry agent start this long
     this.shellPollMs = 250;
+    this.settleMs = 20_000; // after a task is sent: how long the agent has to leave idle
+    this.settlePollMs = 1000;
   }
 
   exec(args, opts = {}) { return run(this.bin, this.machine ? ['--machine', this.machine, ...args] : args, { env: this.env, ...opts }); }
@@ -479,6 +493,49 @@ export class HerdrBackend {
     const args = ['agent', 'prompt', target, text];
     if (wait) args.push('--wait', '--timeout', String(timeoutSec * 1000));
     return okJson(await this.exec(args, { timeout: (timeoutSec + 30) * 1000 }), 'herdr agent prompt');
+  }
+
+  /**
+   * Send a task and check that the agent took it: it has to start working
+   * (or ask something) within settleMs; `done` counts only when herdr saw a
+   * state change since the send, since an agent that finished its last turn
+   * is `done` already. An agent that stays where it was lost the text: Muse,
+   * for one, updates itself at launch and restarts with an empty prompt.
+   * Then, once: Enter again if the screen shows the text, otherwise the text
+   * again. agent_blocked is thrown as prompt() throws it.
+   * Returns {delivered, state, retried: null | 'enter' | 'text'}.
+   */
+  async deliver(target, text) {
+    let before = await this.agentInfo(target);
+    await this.prompt(target, text);
+    let s = await this.settle(target, before);
+    if (s.took || s.state === 'chiuso') return { delivered: s.took, state: s.state, retried: null };
+    const retried = showsTask(await this.screen(target), text) ? 'enter' : 'text';
+    before = await this.agentInfo(target);
+    if (retried === 'enter') await this.exec(['agent', 'send-keys', target, 'enter']);
+    else await this.prompt(target, text);
+    s = await this.settle(target, before);
+    return { delivered: s.took, state: s.state, retried };
+  }
+
+  /** Did the agent take what was just sent? {took, state}, after settleMs at most ('chiuso' if herdr lost it). */
+  async settle(target, before) {
+    const deadline = Date.now() + this.settleMs;
+    for (;;) {
+      const info = await this.agentInfo(target);
+      if (!info) return { took: false, state: 'chiuso' };
+      const state = info.agent_status ?? 'unknown';
+      const moved = before?.state_change_seq == null || info.state_change_seq !== before.state_change_seq;
+      const took = state === 'working' || state === 'blocked' || (state === 'done' && (before?.agent_status !== 'done' || moved));
+      if (took || Date.now() >= deadline) return { took, state };
+      await sleep(this.settlePollMs);
+    }
+  }
+
+  /** Wait until the agent stops: idle, done or blocked. Returns its state, or null after timeoutSec. */
+  async waitStopped(target, timeoutSec) {
+    const res = await this.exec(['agent', 'wait', target, '--timeout', String(timeoutSec * 1000)], { timeout: (timeoutSec + 30) * 1000 });
+    return res.ok ? parseJson(res.stdout)?.result?.agent?.agent_status ?? null : null;
   }
 
   async read(target, lines = 120) {

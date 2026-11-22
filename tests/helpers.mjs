@@ -1,5 +1,5 @@
 // Test sandbox: a temp HOME, a project dir, and fake executables on PATH
-// (herdr, hc, codexbar, claude, codex) that record calls in a state file.
+// (herdr, hc, codexbar, claude, codex, muse) that record calls in a state file.
 import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, readFileSync, existsSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -125,18 +125,32 @@ if (g === 'agent' && c === 'start') {
   const si = args.indexOf('--session-id'); const ri = args.indexOf('--resume');
   const sid = si >= 0 ? args[si + 1] : ri >= 0 ? args[ri + 1] : (kind === 'codex' ? 'codex-' + h.starts : null);
   const blocked = process.env.FAKE_START_BLOCKED === kind;
+  // Muse registers its session where muse sessions --json lists it.
+  if (kind === 'muse' && !process.env.FAKE_MUSE_NO_SESSION) { st.muse ??= { sessions: [] }; st.muse.sessions.push({ sessionId: 'muse-sess-' + h.starts, name: 'navy-pisces', workspaceLabel: String(h.paneCwd[pane] || '/x').split('/').pop(), openedBy: 'tui', binaryVersion: null, attachable: false }); }
   h.agents.push({ name: a[2], agent: kind, pane_id: pane, tab_id: pane.replace(':p', ':t'), agent_status: blocked ? 'blocked' : 'idle', cwd: '/x', agent_session: sid ? { value: sid } : null, args, dialog: blocked ? { sel: 0, path: process.env.FAKE_DIALOG_PATH || h.paneCwd[pane] || '/x' } : null });
   if (blocked) return fail('agent_not_ready', 'agent ' + a[2] + ' is blocked during startup and is not ready for prompts');
   return ok({ agent: a[2] });
 }
 if (g === 'agent' && c === 'list') { save(); console.log(JSON.stringify({ result: { agents: h.agents.map(({ args, dialog, ...x }) => x) } })); process.exit(0); }
 if (g === 'agent' && c === 'prompt' && process.env.FAKE_PROMPT_BLOCKED) return fail('agent_blocked', 'agent ' + a[2] + ' is blocked and requires interactive input');
-if (g === 'agent' && c === 'prompt') { const ag = h.agents.find((x) => x.name === a[2]); if (!ag) return fail('not_found', 'no agent'); if (ag.agent_status === 'blocked') return fail('agent_blocked', 'agent ' + a[2] + ' is blocked and requires interactive input'); ag.agent_status = process.env.FAKE_AFTER_PROMPT || 'done'; ag.last_prompt = a[3]; return ok({ submitted: true }); }
+// FAKE_PROMPT_LOST=n: the first n prompts vanish (the CLI restarts after updating itself).
+// FAKE_PROMPT_NO_ENTER=1: the first prompt is typed but not submitted.
+if (g === 'agent' && c === 'prompt') {
+  const ag = h.agents.find((x) => x.name === a[2]); if (!ag) return fail('not_found', 'no agent');
+  if (ag.agent_status === 'blocked') return fail('agent_blocked', 'agent ' + a[2] + ' is blocked and requires interactive input');
+  h.prompts = (h.prompts ?? 0) + 1;
+  // h.loseNext (set by a test): the next prompts vanish too.
+  if (h.prompts <= Number(process.env.FAKE_PROMPT_LOST ?? 0) || (h.loseNext > 0 && h.loseNext--)) { h.lost = [...(h.lost ?? []), a[3]]; return ok({ submitted: true }); }
+  if (process.env.FAKE_PROMPT_NO_ENTER && h.prompts === 1) { ag.typed = a[3]; return ok({ submitted: true }); }
+  ag.agent_status = process.env.FAKE_AFTER_PROMPT || 'done'; ag.seq = (ag.seq ?? 0) + 1; ag.last_prompt = a[3]; h.delivered = [...(h.delivered ?? []), a[3]];
+  return ok({ submitted: true });
+}
 // The three folder-trust dialogs, as captured from the real CLIs (path wrapped at 40 columns).
 const DIALOGS = {
   claude: { head: ['Accessing workspace:'], q: ' Quick safety check: Is this a project you created or one you trust? (Like your own code)', mark: '❯', options: ['No, exit', 'Yes, I trust this folder'], trust: 1 },
   codex: { head: ['  Folder access'], q: '  Trust this folder? Codex can read, edit, and run files here.', mark: '›', options: ['1. Trust and continue', '2. Back to Agent Command Center'], trust: 0 },
   agy: { head: ['Accessing workspace:'], q: 'Do you trust the contents of this project?', mark: '>', options: ['Yes, I trust this folder', 'No, exit'], trust: 0 },
+  muse: { head: ['Muse Code updated 1.4.24-R9131.1 -> 1.4.25-R9361.1', 'Do you trust this workspace?', 'Workspace:'], q: 'Trusting allows project-local skills, rules, hooks, and plugin config to load before the model runs.', mark: '⟩', options: ['1  Trust and continue', '2  Quit'], trust: 0 },
 };
 const screenOf = (ag) => {
   const d = DIALOGS[ag.agent]; const p = ag.dialog.path;
@@ -176,6 +190,7 @@ if (g === 'agent' && c === 'send-keys') {
   const ag = h.agents.find((x) => x.name === a[2]); if (!ag) return fail('not_found', 'no agent');
   h.keys = [...(h.keys ?? []), ...a.slice(3)];
   for (const k of a.slice(3)) {
+    if (k === 'enter' && ag.typed) { ag.last_prompt = ag.typed; h.delivered = [...(h.delivered ?? []), ag.typed]; ag.typed = null; ag.agent_status = process.env.FAKE_AFTER_PROMPT || 'done'; ag.seq = (ag.seq ?? 0) + 1; continue; }
     if (!ag.dialog) continue;
     const d = DIALOGS[ag.agent];
     if (k === 'down') ag.dialog.sel = Math.min(ag.dialog.sel + 1, d.options.length - 1);
@@ -186,9 +201,13 @@ if (g === 'agent' && c === 'send-keys') {
   }
   return ok({ type: 'ok' });
 }
-if (g === 'agent' && c === 'get') { const ag = h.agents.find((x) => x.name === a[2] || x.pane_id === a[2]); if (!ag) return fail('agent_not_found', 'gone'); return ok({ agent: { name: ag.name, agent_status: ag.agent_status, pane_id: ag.pane_id } }); }
+if (g === 'agent' && c === 'get') { const ag = h.agents.find((x) => x.name === a[2] || x.pane_id === a[2]); if (!ag) return fail('agent_not_found', 'gone'); return ok({ agent: { name: ag.name, agent_status: ag.agent_status, pane_id: ag.pane_id, state_change_seq: ag.seq ?? 0 } }); }
 if (g === 'agent' && c === 'wait') { const ag = h.agents.find((x) => x.name === a[2]); if (!ag) return fail('agent_not_running', 'gone'); return ok({ agent: { name: ag.name, agent_status: ag.agent_status } }); }
 if (g === 'agent' && c === 'read' && process.env.FAKE_READ_NOT_IDLE && a.includes('recent-unwrapped')) return fail('agent_not_idle', 'agent ' + a[2] + ' is working');
+// A prompt typed but not submitted sits in the input box.
+if (g === 'agent' && c === 'read' && a.includes('visible') && h.agents.find((x) => x.name === a[2])?.typed) {
+  save(); console.log(['  Muse Code 1.4.25', '', '❯ ' + h.agents.find((x) => x.name === a[2]).typed, '', '  muse-wonder-full-1.0 · max'].join(String.fromCharCode(10))); process.exit(0);
+}
 if (g === 'agent' && c === 'read') { save(); console.log('output of ' + a[2] + ' (' + a[a.indexOf('--source') + 1] + ')'); process.exit(0); }
 fail('unknown', 'fake herdr: ' + a.join(' '));
 `;
@@ -229,6 +248,16 @@ const VERSION = (name) => `#!/usr/bin/env node
 console.log('${name} 9.9.9');
 `;
 
+// muse sessions --json lists what the fake herdr registered when it started a Muse agent.
+const FAKE_MUSE = `#!/usr/bin/env node
+const fs = require('fs');
+const S = process.env.FAKE_STATE;
+const st = fs.existsSync(S) ? JSON.parse(fs.readFileSync(S, 'utf8')) : {};
+if (process.argv[2] === '--version') console.log('Muse Code 1.4.25 (1.4.25-R9361.1)');
+else if (process.argv[2] === 'sessions') console.log(JSON.stringify({ sessions: st.muse?.sessions ?? [] }));
+else process.exit(1);
+`;
+
 const FAKE_AGY = `#!/usr/bin/env node
 if (process.argv[2] === 'models') console.log(process.env.FAKE_AGY_MODELS ?? '');
 else if (process.argv[2] === '--version') console.log('agy 1.5.12');
@@ -248,7 +277,7 @@ export function sandbox({ codexbar = CODEXBAR_FIXTURE, bins = ['herdr', 'hc', 'c
   const bin = join(root, 'bin');
   const project = join(root, 'project');
   for (const d of [home, bin, project]) mkdirSync(d, { recursive: true });
-  const files = { herdr: FAKE_HERDR, hc: FAKE_HC, codexbar: fakeCodexbar(codexbar), claude: VERSION('claude'), codex: VERSION('codex-cli'), kimi: VERSION('kimi'), agy: FAKE_AGY, mmx: VERSION('mmx') };
+  const files = { herdr: FAKE_HERDR, hc: FAKE_HC, codexbar: fakeCodexbar(codexbar), claude: VERSION('claude'), codex: VERSION('codex-cli'), kimi: VERSION('kimi'), agy: FAKE_AGY, mmx: VERSION('mmx'), muse: FAKE_MUSE };
   for (const name of bins) {
     const p = join(bin, name);
     writeFileSync(p, files[name]);

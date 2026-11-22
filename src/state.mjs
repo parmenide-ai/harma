@@ -54,11 +54,11 @@ export function saveConfig(root, cfg) {
   ensureGitignore(root);
 }
 
-/** git ignores harma's caches and headless runs (prompts and answers); added to older projects too. */
+/** git ignores harma's caches, headless runs and tasks not yet delivered; added to older projects too. */
 export function ensureGitignore(root) {
   const p = statePath(root, '.gitignore');
   const have = existsSync(p) ? readFileSync(p, 'utf8') : '';
-  const missing = ['cache/', 'runs/'].filter((l) => !have.split('\n').includes(l));
+  const missing = ['cache/', 'runs/', 'prompts/'].filter((l) => !have.split('\n').includes(l));
   if (missing.length) writeFileSync(p, have + (have && !have.endsWith('\n') ? '\n' : '') + missing.map((l) => `${l}\n`).join(''));
 }
 
@@ -87,16 +87,30 @@ export function agentsFromEvents(events) {
           backend: e.backend, target: e.target, cwd: e.cwd, worktree: e.worktree ?? null, started_at: e.at,
           mode: e.mode ?? 'interactive', run_dir: e.run_dir ?? null,
           session_id: e.session_id ?? cur.session_id ?? null, closed_at: null, state: 'open',
+          keep: false, pending: null, prompted_at: null,
         });
         break;
       case 'session':
         cur.session_id = e.session_id;
         cur.session_source = e.source;
         break;
+      case 'prompted':
+        cur.prompted_at = e.at;
+        cur.pending = null; // whatever reached the agent replaces a task kept aside
+        break;
+      case 'pending':
+        cur.pending = { file: e.file, chars: e.chars, reason: e.reason, at: e.at };
+        break;
+      case 'keep':
+        cur.keep = Boolean(e.on);
+        break;
       case 'closed':
         cur.closed_at = e.at;
         cur.state = 'closed';
         cur.result = e.result ?? cur.result;
+        cur.closed_by = e.by ?? null;
+        cur.keep = false;
+        cur.pending = null;
         break;
       case 'resumed':
         cur.state = 'open';
@@ -104,6 +118,9 @@ export function agentsFromEvents(events) {
         cur.target = e.target ?? cur.target;
         cur.backend = e.backend ?? cur.backend;
         cur.mode = 'interactive'; // resume always reopens a conversation
+        cur.keep = false;
+        cur.pending = null;
+        cur.prompted_at = null;
         break;
       default:
         break;

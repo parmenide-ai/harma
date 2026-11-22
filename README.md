@@ -13,7 +13,7 @@ From one conversation with your orchestrator, harma covers eight steps:
 3. **Credits**: reads how much each provider has left from [CodexBar](https://github.com/steipete/CodexBar), or from a budget you declare
 4. **Intelligence**: ranks every model and effort pair by the [Artificial Analysis](https://artificialanalysis.ai/models) (AA) Intelligence Index and cost per task
 5. **Routing**: proposes models for each kind of job; you accept them or pick your own, with several models per job in order of preference
-6. **Monitoring**: shows what each agent is doing, and answers the questions and one-time permission requests an agent stops on, as far as you allow
+6. **Monitoring**: checks that each agent received its task, shows what it is doing, waits for it to finish, and answers the questions and one-time permission requests it stops on, as far as you allow
 7. **Cost**: estimates cost per agent and says where to delegate more or less
 8. **Cleanup**: saves each agent's session ID, closes its tab, and reopens the same session later with its full context
 

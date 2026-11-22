@@ -7,14 +7,17 @@
 // answer policy allows (see answers.mjs).
 import { realpathSync } from 'node:fs';
 
-// Texts captured from claude 2.1.327, codex-cli 0.170.0 and agy 1.5.12 under herdr 0.9.5.
+// Texts captured from claude 2.1.327, codex-cli 0.170.0, agy 1.5.12 and
+// muse 1.4.25 under herdr 0.9.5.
 export const TRUST_DIALOGS = {
   claude: { title: /Is this a project you created or one you trust\?/, option: /Yes, I trust this folder/ },
   codex: { title: /Trust this folder\?/, option: /Trust and continue/ },
   agy: { title: /Do you trust the contents of this project\?/, option: /Yes, I trust this folder/ },
+  muse: { title: /Do you trust this workspace\?/, option: /Trust and continue/ },
 };
 
-const SELECTED = /^\s*[❯›>]\s+(.*\S)\s*$/;
+// Muse marks the selected option with ⟩.
+const SELECTED = /^\s*[❯›>⟩]\s+(.*\S)\s*$/;
 const squash = (s) => s.replace(/\s+/g, '');
 
 function variants(path) {

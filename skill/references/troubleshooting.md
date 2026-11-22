@@ -2,12 +2,20 @@
 
 ## Exit code 4: the agent waits on a dialog
 
-The agent waits on a question, and the task or message wasn't delivered. At startup it's often "trust this folder?" in a new directory.
+The agent waits on a question, and harma kept the task or message aside. At startup it's often "trust this folder?" in a new directory.
 
 1. `harma read <name> --lines 40` to see the question
 2. If it's the folder-trust dialog, it follows the trust policy: tell the user what it asks and ask them to answer it in the agent's tab or terminal. If they want harma to handle it in the project folder, they can run `harma trust on` (or ask you to); harma already answers it in the worktrees it creates, unless the user ran `harma trust off`
 3. Any other question or permission request: answer it with `harma answer`, as SKILL.md's "Answer a waiting agent" says. Exit code 3 means it needs the user's yes; exit code 4 means the option you named isn't on screen (the hint lists the options)
-4. Then send the task: `harma send <name> "<task>" --yes` (this needs the user's yes for the send)
+4. Then `harma wait <name>`: it delivers the task kept aside as soon as the agent is free, and waits through a trust dialog until the user has answered it. `harma send <name> --pending` delivers it now. Neither needs a new yes
+
+## Exit code 4: the task didn't start
+
+The agent stayed idle even after harma sent the task twice ("COMPITO NON PARTITO"). Read the screen with `harma read <name> --lines 40`. When the agent is ready for input, `harma send <name> --pending`. If it keeps failing, tell the user what the screen shows.
+
+## Exit code 5: harma wait ran out of time
+
+The agents still work. Run `harma wait` again, or do other work and come back.
 
 ## No usable model for a job
 
@@ -31,7 +39,7 @@ The bundled Artificial Analysis snapshot doesn't cover it. If `AA_API_KEY` is se
 
 ## Cleanup keeps an agent
 
-`working` or `blocked` agents, and agents without a known session id, stay open. Check with `harma status --json` and `harma read <name>`. Use `--force` only when the user asks, since it loses that agent's context.
+`working` or `blocked` agents, agents without a known session id, agents whose task wasn't delivered and agents marked with `harma keep` stay open; `cleanup --agent <name>` closes a marked one. Check with `harma status --json` and `harma read <name>`. Use `--force` only when the user asks, since it loses that agent's context.
 
 ## Anything else
 

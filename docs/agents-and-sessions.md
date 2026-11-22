@@ -72,11 +72,11 @@ Nobody answers permission requests in print mode: each CLI applies its own non-i
 
 ## Folder trust
 
-The first time Claude Code, Codex or Antigravity opens a folder, it asks whether you trust it, and waits. Each CLI keeps that answer differently, which matters for worktrees:
+The first time Claude Code, Codex, Antigravity or Muse opens a folder, it asks whether you trust it, and waits. Each CLI keeps that answer differently, which matters for worktrees:
 
 - **Claude Code** didn't ask in a new worktree of a project it already trusted, in our tests
 - **Codex** applies the answer to the whole repository root, so it asks once per repository, worktrees included
-- **Antigravity** records each folder on its own, so it asks for every new worktree
+- **Antigravity** and **Muse** ask for every new folder, worktrees included
 
 The project's trust policy decides who answers:
 
@@ -99,7 +99,7 @@ When an agent stops at startup and the policy covers its folder, harma reads its
 - the dialog names that folder
 - the selected option is the trust option; harma moves to it and checks again before pressing Enter
 
-Otherwise it leaves the agent waiting: `dispatch` exits with code 4 and the task isn't sent. Each answer is recorded in `.harma/agents.jsonl` as a `trusted` event, and each refusal as `trust_skipped`. harma never answers a tool-permission dialog by itself, such as a request to run a command; the orchestrator can, as the next section explains.
+Otherwise it leaves the agent waiting: `dispatch` exits with code 4 and keeps the task aside until you've answered, as [the task reaches the agent](#the-task-reaches-the-agent) explains. Each answer is recorded in `.harma/agents.jsonl` as a `trusted` event, and each refusal as `trust_skipped`. harma never answers a tool-permission dialog by itself, such as a request to run a command; the orchestrator can, as the next section explains.
 
 ## Questions and permissions
 
@@ -137,14 +137,41 @@ The skill tells the orchestrator how to judge:
 
 After pressing Enter, harma waits until the agent leaves `blocked`. If another question appears instead, it prints its last lines, and the orchestrator answers that one the same way. Each answer is recorded in `.harma/agents.jsonl` as an `answered` event, with the option, the reason and what allowed it (`policy answers permissions`, or `utente (--yes)`). `harma send` can't reach a waiting agent: it exits with code 4 and says to answer first.
 
+## The task reaches the agent
+
+`dispatch` and `send` check that the agent took the task: on herdr it has to leave `idle` within 20 seconds, for `working`, `blocked` or `done`. An agent that stays idle lost the text. Muse, for one, updates itself at launch and restarts with an empty prompt. harma then tries once more: it presses Enter again when the text is still in the input box, and sends the whole text again otherwise. The output says when it did.
+
+When the task still doesn't arrive, or a dialog stopped the agent first, harma keeps the task aside in `.harma/prompts/` and exits with code 4. `harma status` shows `NON consegnato` in the `compito` column, and `cleanup` leaves the agent open. `harma wait agent_name` delivers the task as soon as the agent is free, for example once you've trusted the folder; `harma send agent_name --pending` delivers it now. Neither needs a new `--yes`, since you approved that task when it was dispatched or sent. A new `send` replaces a task kept aside, and its output says where the old task's file is.
+
+On herdr-core, harma sends the task without this check.
+
+## Wait for agents
+
+```sh
+harma wait builder reviewer --timeout 540
+```
+
+`wait` returns when the agents named stop, or every open agent when you name none:
+
+| Exit code | When |
+|---|---|
+| 0 | Every agent is `idle` or `done` at two checks in a row, five seconds apart, a headless job has its result, or a terminal has closed. With `--any`, the first agent that stops is enough |
+| 4 | An agent waits on a question or a permission, which the orchestrator answers with `harma answer`; or a task kept aside didn't start even when sent twice |
+| 5 | Time ran out (`--timeout`, default 540 seconds) while agents still work: run it again |
+
+`wait` keeps waiting through a folder-trust dialog, which is yours to answer, and delivers a task kept aside as soon as its agent is free. The default timeout stays under the 10-minute limit of an agent's shell tool.
+
+`idle` means only that the agent's turn ended: it finished, or it waits for instructions. The `compito` column of `harma status` says whether its task was delivered (`consegnato … fa`), is still kept aside (`NON consegnato`), or was never given (`nessuno`).
+
 ## Session IDs
 
 A session ID lets the agent CLI reopen a conversation with its full context. harma records it as soon as it's known:
 
 - **Claude Code**: harma generates the ID and passes it with `--session-id` when it starts the agent
 - **Codex**: Codex creates the ID on its first turn; harma reads it from herdr's agent detection, or from `~/.codex/sessions` by matching the folder and start time. For a headless `codex exec`, harma reads it from the job's output
+- **Muse**: harma reads it from `muse sessions --json`, which lists the sessions Muse runs on this machine: the agent's is the one harma doesn't know yet in the agent's folder. When several fit, harma doesn't guess
 
-Other CLIs run normally, but harma can resume only Claude Code and Codex sessions.
+Other CLIs run normally, but harma can resume only Claude Code, Codex and Muse sessions.
 
 ## Clean up finished agents
 
@@ -157,7 +184,16 @@ harma cleanup
 
 The first command lists what would close, with session IDs. The second saves each session ID to `.harma/agents.jsonl`, then closes the agent's tab or terminal.
 
-`cleanup` keeps an agent open in two cases: it's still `working` or `blocked`, or harma can't find its session ID, since closing it would lose the context. A finished headless job closes anyway, since its answer stays on disk. `--force` closes it anyway, and `--agent agent_name` limits cleanup to one agent. `harma cleanup --workspace` also closes the herdr workspaces harma created, here and on each machine, once no harma agent is open in them.
+`cleanup` keeps an agent open when:
+
+- it's still `working` or `blocked`
+- harma can't find its session ID, since closing it would lose the context; a finished headless job closes anyway, since its answer stays on disk
+- its task hasn't been delivered yet
+- it's marked to stay open, with `harma keep agent_name` or `dispatch --keep`: a builder that will get review fixes, or a reviewer for more rounds
+
+`--agent agent_name` limits cleanup to one agent and closes it even when it's marked; `harma keep agent_name --off` removes the mark. `--force` closes agents in the first three cases. `harma cleanup --workspace` also closes the herdr workspaces harma created, here and on each machine, once no harma agent is open in them.
+
+When you close an agent's tab yourself, the next `status`, `wait` or `cleanup` notices it and records the agent as closed, with its session ID if harma knew it or still finds it in Codex's logs.
 
 ## Resume an agent
 
@@ -168,7 +204,7 @@ harma resume planner --print-only
 harma resume planner --yes
 ```
 
-`--print-only` shows the native command, for example `claude --resume <session_id> --model claude-opus-5-5 --effort high` or `codex resume <session_id> -m gpt-6.2-sol -c model_reasoning_effort="high"`. Under the `confirm` policy, resuming needs `--yes`.
+`--print-only` shows the native command, for example `claude --resume <session_id> --model claude-opus-5-5 --effort high`, `codex resume <session_id> -m gpt-6.2-sol -c model_reasoning_effort="high"` or `muse resume <session_id> --model muse-wonder-full-1.0 --reasoning-effort max`. Under the `confirm` policy, resuming needs `--yes`.
 
 ## Project files
 
@@ -177,8 +213,9 @@ harma keeps its state in `.harma/` at the project root:
 | Path | Contents |
 |---|---|
 | `.harma/config.json` | Orchestrator, backend, herdr layout and workspaces (also per machine), trust policy, dispatch policy, budgets, thresholds, routing overrides and your model choices (`roster`) |
-| `.harma/agents.jsonl` | Append-only events: `orchestrator`, `started`, `session`, `prompted`, `blocked`, `answered`, `answer_policy`, `trusted`, `trust_skipped`, `trust_policy`, `closed`, `resumed`, `roster` |
+| `.harma/agents.jsonl` | Append-only events: `orchestrator`, `started`, `session`, `prompted`, `pending`, `blocked`, `answered`, `answer_policy`, `trusted`, `trust_skipped`, `trust_policy`, `keep`, `closed`, `resumed`, `roster` |
 | `.harma/runs/` | One folder per headless job: `prompt.md`, `job.json`, `output.md`, `stderr.log`, `result.json`; git ignores this folder |
+| `.harma/prompts/` | Tasks kept aside because they didn't reach their agent; git ignores this folder |
 | `.harma/cache/` | Last inventory, credits, ranking and selection status, each with its fetch time; git ignores this folder |
 
 `config.json` and `agents.jsonl` are plain files you can read and commit. Edit `config.json` by hand only for `budgets`, `thresholds` and `routing`; use `harma init` and `harma select` for the rest.

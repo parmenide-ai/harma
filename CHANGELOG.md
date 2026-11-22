@@ -2,6 +2,19 @@
 
 All notable changes to harma, newest first. Versions follow [semantic versioning](https://semver.org/).
 
+## Unreleased
+
+Agents that don't lose their task, and an orchestrator that doesn't poll:
+
+- **The task reaches the agent**: `dispatch` and `send` check that the agent took the task, which on herdr means it leaves `idle` within 20 seconds. Muse can update itself at launch and restart with an empty prompt, and harma marked it `idle` like an agent that had finished. Now harma sends the task once more (or presses Enter again when the text sits in the input box) and says so
+- **Tasks kept aside**: a task that still doesn't arrive, or that a dialog stopped (for example Muse's "Do you trust this workspace?" in a folder harma didn't create), is kept in `.harma/prompts/` and `dispatch` exits with code 4. `harma wait` delivers it as soon as the agent is free, and `harma send <agent> --pending` delivers it now, both under the yes already given. Before, the task was lost and the orchestrator had to send it again
+- **`harma wait [agents…] [--any] [--timeout s]`**: waits until agents stop, instead of loops the orchestrator wrote itself. It exits with 0 when they stop, 4 as soon as one waits on a question, and 5 when the time runs out (default 540 s, under an agent's 10-minute shell limit). It waits through a folder-trust dialog, which is the user's
+- **`harma keep <agent>` and `dispatch --keep`**: `cleanup` leaves the agent open until you name it with `--agent`. Before, `cleanup` closed every finished agent, including a builder still needed for review fixes
+- **`status` says whether the task arrived**: a `compito` column (`consegnato … fa`, `NON consegnato`, `nessuno`) and a `tenuto` column, since `idle` alone means finished, waiting for instructions or never started
+- **Muse sessions**: harma reads the session ID from `muse sessions --json`, so `cleanup` closes a Muse agent without `--force` and `harma resume` reopens it with `muse resume`. Before, Muse agents could only be closed with `--force`, losing the session
+- **Muse's trust dialog**: harma recognizes it (its `⟩` marker and its options numbered "1  Trust and continue") and answers it in the worktrees it creates, as for the other CLIs. `harma answer` reads Muse's choice lists too
+- **Tabs closed by hand**: the next `status`, `wait` or `cleanup` records the agent as closed, with its session ID when harma has it, instead of showing it open but not found
+
 ## 0.6.0 (2026-11-20)
 
 The orchestrator answers agents that wait:
