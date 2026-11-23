@@ -1,12 +1,13 @@
 import {
   cmdInit, cmdModels, cmdCredits, cmdRank, cmdRoute, cmdDispatch, cmdSend, cmdRead,
   cmdStatus, cmdCosts, cmdCleanup, cmdResume, cmdSelect, cmdTrust, cmdWorktree, cmdAnswer, cmdAnswers,
+  cmdKeep, cmdWait,
 } from './commands.mjs';
 import { cmdRun } from './run.mjs';
 import { cmdInstall, cmdUninstall, cmdDoctor } from './install.mjs';
 import { HarmaError } from './util.mjs';
 
-const BOOLEAN = new Set(['json', 'yes', 'wait', 'refresh', 'dry-run', 'force', 'all', 'print-only', 'help', 'version', 'workspace', 'open', 'accept', 'show', 'close-tab', 'worktree', 'trust-project', 'headless']);
+const BOOLEAN = new Set(['json', 'yes', 'wait', 'refresh', 'dry-run', 'force', 'all', 'print-only', 'help', 'version', 'workspace', 'open', 'accept', 'show', 'close-tab', 'worktree', 'trust-project', 'headless', 'keep', 'pending', 'off', 'any']);
 
 export function parseArgs(argv) {
   const flags = { _: [] };
@@ -52,25 +53,31 @@ Scegliere i modelli (l'utente valida o cambia le proposte)
 
 Delegare (con policy "confirm" serve --yes, dopo il consenso dell'utente)
   dispatch --name <n> (--model h:m [--effort e] | --task-type <tipo>) [--prompt "…" | --prompt-file f] [--wait] [--yes]
-           [--layout auto|workspace|tab|split[:right|:down]] [--worktree [--branch b]]
+           [--layout auto|workspace|tab|split[:right|:down]] [--worktree [--branch b] [--base ref]]
            [--headless [--max-time s]] [--machine <macchina herdr> --cwd <cartella là>]
                                  layout auto: dentro herdr un pane accanto all'orchestratore finché c'è
                                  spazio, poi un tab; fuori un workspace per progetto
-                                 --worktree: checkout git separato
+                                 --worktree: checkout git separato; --base: parte da quel branch o commit
+                                 (es. origin/<branch della PR>)
                                  --headless: un compito, una risposta (modo print della CLI), in un pane
                                  --machine: l'agente gira sul server herdr di un'altra macchina
   send <nome> "<testo>" [--wait] [--yes]
+                                 harma controlla che l'agente parta; se resta fermo rimanda il testo una volta
+  send <nome> --pending          consegna il compito che harma ha tenuto da parte (agente bloccato o fermo)
   read <nome> [--lines N]        schermo dell'agente; per un lavoro non interattivo, la sua risposta
   answer <nome> --kind question|permission (--option "<testo o n.>" [--text "…"] | --text "…" | --keys "down,enter")
          [--reason "…"] [--yes]  risponde a un agente bloccato su una domanda o un permesso; harma
                                  controlla sullo schermo l'opzione selezionata prima di Invio
 
 Sorvegliare
-  status [--all]                 stato di ogni agente aperto
+  status [--all]                 stato di ogni agente aperto, compito consegnato o no, agenti tenuti
+  wait [<nome>…] [--any] [--timeout S]   aspetta che gli agenti si fermino (default 540 s); consegna i
+                                 compiti tenuti da parte; esce con 4 se uno aspetta una risposta, 5 se lavorano ancora
   costs                          costo per agente, crediti per provider, indicazioni di delega
 
 Pulire e riprendere
   cleanup [--dry-run] [--agent <nome>] [--force] [--workspace]   salva l'id di sessione e chiude le finestre finite
+  keep <nome> [--off]            cleanup lascia aperto l'agente finché non lo nomini (anche dispatch --keep)
   resume <nome> [--yes] [--print-only] [--layout …] riapre la sessione salvata con il suo contesto
 
 Installazione
@@ -83,7 +90,7 @@ const COMMANDS = {
   init: cmdInit, models: cmdModels, credits: cmdCredits, rank: cmdRank, route: cmdRoute,
   dispatch: cmdDispatch, send: cmdSend, read: cmdRead, status: cmdStatus, costs: cmdCosts,
   cleanup: cmdCleanup, resume: cmdResume, select: cmdSelect, trust: cmdTrust, install: cmdInstall, uninstall: cmdUninstall, doctor: cmdDoctor,
-  worktree: cmdWorktree, answer: cmdAnswer, answers: cmdAnswers,
+  worktree: cmdWorktree, answer: cmdAnswer, answers: cmdAnswers, keep: cmdKeep, wait: cmdWait,
   _run: cmdRun, // internal: the runner of a headless job, typed by harma into its terminal
 };
 

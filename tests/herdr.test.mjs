@@ -266,6 +266,7 @@ async function gitProject() {
   write(pjoin(sb.project, 'app.js'), 'v1\n');
   git('add', '.gitignore', 'app.js');
   git('commit', '-q', '-m', 'init');
+  sb.git = (...args) => String(git(...args)).trim();
   return sb;
 }
 
@@ -302,4 +303,57 @@ test('harma worktree --copy: those files go into each new worktree before the ag
   assert.equal(await run(sb, ['worktree', '--copy', '']), 0);
   assert.deepEqual(loadConfig(sb.project).worktree_copy, []);
   assert.ok(exists(wt));
+});
+
+// ── worktree from a pull request's branch (--base) ───────────────────────
+/** A commit on its own branch; with `pull`, only refs/pull/<n>/head keeps it, as for a fork's pull request. */
+function prCommit(sb, branch, { pull = null } = {}) {
+  sb.git('checkout', '-q', '-b', branch);
+  write(pjoin(sb.project, 'app.js'), `${branch}\n`);
+  sb.git('commit', '-q', '-am', branch);
+  const sha = sb.git('rev-parse', 'HEAD');
+  sb.git('checkout', '-q', '-');
+  if (pull) {
+    sb.git('update-ref', `refs/pull/${pull}/head`, sha);
+    sb.git('branch', '-q', '-D', branch);
+  }
+  return sha;
+}
+
+test('--worktree --base: the worktree starts from the PR branch, and harma trusts it when the code is the project\'s own', async () => {
+  const sb = await gitProject();
+  const sha = prCommit(sb, 'feature');
+  assert.equal(await dispatch(sb, 'rev', 'codex:gpt-6.2-sol', ['--worktree', '--base', 'feature'], { FAKE_START_BLOCKED: 'codex' }), 0);
+  assert.equal(sb.state().herdr.worktrees[0].base, 'feature');
+  assert.deepEqual(sb.state().herdr.trusted, ['rev']);
+  const { worktree } = agents(sb)[0];
+  assert.deepEqual([worktree.base, worktree.base_commit, worktree.base_own], ['feature', sha, true]);
+  assert.match(sb.output(), /Worktree: .*\(branch harma\/rev, da feature\)/);
+});
+
+test('--worktree --base from a fork\'s pull request: harma leaves the trust dialog to the user, also for a branch made from it', async () => {
+  const sb = await gitProject();
+  prCommit(sb, 'fork-work', { pull: 12 });
+  assert.equal(await run(sb, ['dispatch', '--name', 'rev', '--model', 'codex:gpt-6.2-sol', '--prompt', 'go', '--worktree', '--base', 'refs/pull/12/head']), 3);
+  assert.match(sb.output(), /fiducia nella cartella: la dà l'utente \(refs\/pull\/12\/head non è in un branch del progetto\)/);
+  sb.clear();
+  assert.equal(await dispatch(sb, 'rev', 'codex:gpt-6.2-sol', ['--worktree', '--base', 'refs/pull/12/head'], { FAKE_START_BLOCKED: 'codex' }), 4);
+  assert.equal(sb.state().herdr.trusted, undefined);
+  assert.match(events(sb).find((e) => e.type === 'trust_skipped').detail, /non è in un branch del progetto/);
+  assert.equal(agents(sb)[0].worktree.base_own, false);
+
+  sb.git('branch', 'harma/rev', 'refs/pull/12/head'); // the branch the first worktree got
+  assert.equal(await dispatch(sb, 'rev2', 'codex:gpt-6.2-sol', ['--worktree', '--base', 'harma/rev'], { FAKE_START_BLOCKED: 'codex' }), 4);
+  assert.equal(sb.state().herdr.trusted, undefined);
+});
+
+test('--base needs --worktree and a commit this repository has', async () => {
+  const sb = await gitProject();
+  const e = { text: '' };
+  const err = (s) => { e.text += s; };
+  assert.equal(await run(sb, ['dispatch', '--name', 'rev', '--model', 'codex:gpt-6.2-sol', '--prompt', 'go', '--base', 'main', '--yes'], { err }), 1);
+  assert.match(e.text, /--base vale solo con --worktree/);
+  assert.equal(await run(sb, ['dispatch', '--name', 'rev', '--model', 'codex:gpt-6.2-sol', '--prompt', 'go', '--worktree', '--base', 'origin/nope', '--yes'], { err }), 1);
+  assert.match(e.text, /origin\/nope non è un commit[\s\S]*git fetch origin/);
+  assert.equal(sb.state().herdr?.worktrees, undefined); // nothing reached herdr
 });

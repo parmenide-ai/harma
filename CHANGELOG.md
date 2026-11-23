@@ -2,6 +2,24 @@
 
 All notable changes to harma, newest first. Versions follow [semantic versioning](https://semver.org/).
 
+## 0.7.0 (2026-11-23)
+
+Agents that don't lose their task, and an orchestrator that doesn't poll:
+
+- **The task reaches the agent**: `dispatch` and `send` check that the agent took the task, which on herdr means it leaves `idle` within 20 seconds. Muse can update itself at launch and restart with an empty prompt, and harma marked it `idle` like an agent that had finished. Now harma sends the task once more (or presses Enter again when the text sits in the input box) and says so
+- **Tasks kept aside**: a task that still doesn't arrive, or that a dialog stopped (for example Muse's "Do you trust this workspace?" in a folder harma didn't create), is kept in `.harma/prompts/` and `dispatch` exits with code 4. `harma wait` delivers it as soon as the agent is free, and `harma send <agent> --pending` delivers it now, both under the yes already given. Before, the task was lost and the orchestrator had to send it again
+- **`harma wait [agents…] [--any] [--timeout s]`**: waits until agents stop, instead of loops the orchestrator wrote itself. It exits with 0 when they stop, 4 as soon as one waits on a question, and 5 when the time runs out (default 540 s, under an agent's 10-minute shell limit). It waits through a folder-trust dialog, which is the user's
+- **`harma keep <agent>` and `dispatch --keep`**: `cleanup` leaves the agent open until you name it with `--agent`. Before, `cleanup` closed every finished agent, including a builder still needed for review fixes
+- **`status` says whether the task arrived**: a `compito` column (`consegnato … fa`, `NON consegnato`, `nessuno`) and a `tenuto` column, since `idle` alone means finished, waiting for instructions or never started
+- **Muse sessions**: harma reads the session ID from `muse sessions --json`, so `cleanup` closes a Muse agent without `--force` and `harma resume` reopens it with `muse resume`. Before, Muse agents could only be closed with `--force`, losing the session
+- **Muse's trust dialog**: harma recognizes it (its `⟩` marker and its options numbered "1  Trust and continue") and answers it in the worktrees it creates, as for the other CLIs. `harma answer` reads Muse's choice lists too
+- **Tabs closed by hand**: the next `status`, `wait` or `cleanup` records the agent as closed, with its session ID when harma has it, instead of showing it open but not found. harma first asks herdr or hc for that one terminal, so an agent a listing misses for a moment stays open
+- **A task kept aside goes out once**: a `harma wait` running in the background and a `harma send` don't both deliver it; the second one says the task is already on its way
+- **Review a pull request in a worktree: `dispatch --worktree --base <ref>`**: the worktree starts from that branch or commit, for example `origin/feature-x` after `git fetch`. harma answers its folder-trust dialog, under the `worktrees` policy, only when that commit is already the project's own: in a branch on `origin`, in a tag, or in a local branch that doesn't track another remote. For a fork's pull request it leaves the dialog to the user, under any policy, and the plan says so. Before, a review worktree made by hand got the trust dialog every time
+- **Deliveries herdr's state can't settle**: a CLI command such as `/clear` is sent once without the check, since it may start no turn. For an agent herdr shows as `unknown`, the screen decides, no key is pressed blindly, and the output says the delivery isn't verified. A turn that ends between two checks counts as delivered, through herdr's `completion_seq`. Whether the text appeared on screen is judged against the screen before the send, so a long-paste placeholder from an earlier message (Claude Code's `[Pasted text …]`, Codex's `[Pasted Content …]`) no longer passes for the new one
+- **`harma wait` tries a kept task once**: if the agent still doesn't take it, later waits stop with code 4 and leave it to `harma send --pending`, instead of sending it on every wait
+- **Claude Code variants and folder trust**: harma now answers the trust dialog of `claude-zai`, `claude-moonshot` and `claude-qwencloud` in the worktrees it creates. Before, it didn't recognize their dialog as Claude Code's and the dispatch stopped with code 4
+
 ## 0.6.0 (2026-11-20)
 
 The orchestrator answers agents that wait:

@@ -396,8 +396,9 @@ test('an agent blocked at startup stays recorded, exit 4, task not marked as sen
   assert.equal(code, 4);
   assert.match(sb.output(), /BLOCCATO/);
   const types = events(sb).filter((e) => e.agent === 'stuck').map((e) => e.type);
-  assert.deepEqual(types, ['started', 'blocked']);
+  assert.deepEqual(types, ['started', 'blocked', 'pending']); // the task is kept aside for later
   assert.equal(agents(sb)[0].state, 'open');
+  assert.equal(agents(sb)[0].pending.chars, 1);
 });
 
 test('dispatch refuses a CLI that is not installed', async () => {

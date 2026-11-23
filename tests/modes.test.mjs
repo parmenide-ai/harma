@@ -119,7 +119,7 @@ test('--headless: harma types its runner in a pane once the shell is ready, and 
   assert.equal(readFileSync(job.prompt_file, 'utf8'), 'riassumi il diff');
   assert.equal(job.session_id, a.session_id); // Claude's session id is chosen up front
   assert.deepEqual([job.report, job.keep_alive], [true, true]);
-  assert.match(readFileSync(join(sb.project, '.harma', '.gitignore'), 'utf8'), /^cache\/\nruns\/\n$/);
+  assert.match(readFileSync(join(sb.project, '.harma', '.gitignore'), 'utf8'), /^cache\/\nruns\/\nprompts\/\n$/);
 
   sb.clear();
   await run(sb, ['status', '--json']);

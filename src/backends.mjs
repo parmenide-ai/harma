@@ -22,6 +22,33 @@ import { selectedOption, pickOption } from './answers.mjs';
 
 const MAX_OPTIONS = 15; // a choice list longer than this is not a dialog harma walks
 
+/** How often the screen shows this task: its first line, spaces ignored (the terminal wraps it), and long-paste placeholders. */
+function taskMarks(screen, text) {
+  const flat = String(screen ?? '').replace(/\s+/g, '');
+  const count = (needle) => (needle ? flat.split(needle).length - 1 : 0);
+  const first = String(text).split('\n').find((l) => l.trim()) ?? '';
+  // "[Pasted text #1 +40 lines]" (Claude Code), "[Pasted Content 1234 chars]" (Codex 0.171)
+  return count(first.replace(/\s+/g, '').slice(0, 40)) + (flat.match(/\[Pasted/gi)?.length ?? 0);
+}
+
+/**
+ * Did the task appear on screen since `before` (the screen before the send)?
+ * Typed in the input box or shown in the conversation, it counts once more
+ * than before; a placeholder or the same line from an earlier message counts
+ * the same on both screens.
+ */
+export function showsTask(screen, text, before = '') {
+  return taskMarks(screen, text) > taskMarks(before, text);
+}
+
+/**
+ * A CLI command such as "/clear": it runs inside the agent's CLI and may
+ * start no turn, so herdr has no state change to show for it.
+ */
+export function isCliCommand(text) {
+  return /^\/[\w:.-]+(\s|$)/.test(String(text).trim()) && !String(text).trim().includes('\n');
+}
+
 export function projectId(root) {
   return `${basename(root).toLowerCase().replace(/[^a-z0-9_-]/g, '-').slice(0, 20)}-${createHash('sha1').update(root).digest('hex').slice(0, 6)}`;
 }
@@ -63,6 +90,8 @@ export class HerdrBackend {
     this.trustPollMs = 500;
     this.shellWaitMs = 20_000; // a new pane's shell may still be starting: retry agent start this long
     this.shellPollMs = 250;
+    this.settleMs = 20_000; // after a task is sent: how long the agent has to leave idle
+    this.settlePollMs = 1000;
   }
 
   exec(args, opts = {}) { return run(this.bin, this.machine ? ['--machine', this.machine, ...args] : args, { env: this.env, ...opts }); }
@@ -193,9 +222,13 @@ export class HerdrBackend {
   /**
    * A git worktree for one agent: herdr creates the checkout and opens it as a
    * workspace grouped with the project's, whose root tab hosts the agent.
+   * The new branch starts from `base` when given (a pull request's branch),
+   * otherwise from the project's current commit.
    */
-  async worktree({ root, name, branch, env = {} }) {
-    const res = okJson(await this.exec(['worktree', 'create', '--cwd', root, '--branch', branch, '--label', `harma:${name}`, '--no-focus']), 'herdr worktree create');
+  async worktree({ root, name, branch, base = null, env = {} }) {
+    const args = ['worktree', 'create', '--cwd', root, '--branch', branch, '--label', `harma:${name}`, '--no-focus'];
+    if (base) args.push('--base', base);
+    const res = okJson(await this.exec(args), 'herdr worktree create');
     const r = res?.result ?? {};
     const path = r.worktree?.path;
     const id = r.workspace?.workspace_id;
@@ -210,7 +243,7 @@ export class HerdrBackend {
     const kind = herdrKind(harness);
     if (!kind) throw new HarmaError(`herdr non riconosce ${harness} come agente interattivo`, { hint: 'Usa --headless (lavoro non interattivo) o --backend hc' });
     const at = worktree
-      ? await this.worktree({ root: this.machine ? cwd : root, name, branch: worktree.branch, env })
+      ? await this.worktree({ root: this.machine ? cwd : root, name, branch: worktree.branch, base: worktree.base, env })
       : await this.place({ layout, root, project, cwd, label: name, env });
     if (at.worktree && prepareWorktree) at.worktree.copy = await prepareWorktree(at.worktree.path);
     const startArgs = ['agent', 'start', name, '--kind', kind, '--pane', at.paneId, '--timeout', '60000'];
@@ -246,7 +279,7 @@ export class HerdrBackend {
   async startHeadless({ name, cwd, root, project, layout, worktree, prepareWorktree, command }) {
     checkAgentName(name);
     const at = worktree
-      ? await this.worktree({ root, name, branch: worktree.branch })
+      ? await this.worktree({ root, name, branch: worktree.branch, base: worktree.base })
       : await this.place({ layout, root, project, cwd, label: name });
     if (at.worktree && prepareWorktree) at.worktree.copy = await prepareWorktree(at.worktree.path);
     if (!await this.waitForShell(at.paneId)) {
@@ -479,6 +512,80 @@ export class HerdrBackend {
     const args = ['agent', 'prompt', target, text];
     if (wait) args.push('--wait', '--timeout', String(timeoutSec * 1000));
     return okJson(await this.exec(args, { timeout: (timeoutSec + 30) * 1000 }), 'herdr agent prompt');
+  }
+
+  /**
+   * Send a task and check that the agent took it: it has to start working
+   * (or ask something) within settleMs; `done` counts only when herdr saw a
+   * state change since the send, since an agent that finished its last turn
+   * is `done` already. An agent that stays where it was lost the text: Muse,
+   * for one, updates itself at launch and restarts with an empty prompt.
+   * Then, once: Enter again if the text appeared on screen (typed, not
+   * submitted), otherwise the text again. agent_blocked is thrown as
+   * prompt() throws it, and also when the agent stops on its folder-trust
+   * dialog after the send (`kind`: the herdr agent kind): that dialog comes
+   * only at startup, so the agent restarted and the text is gone.
+   *
+   * Two cases herdr's state can't settle. A CLI command ("/clear") may start
+   * no turn: it is sent once and not checked. An agent herdr shows as
+   * `unknown` throughout: the screen decides, and no key is pressed blindly
+   * (Enter could pick a dialog's default option); the text on screen counts
+   * as delivered, unverified.
+   * Returns {delivered, state, retried: null | 'enter' | 'text', verified}.
+   */
+  async deliver(target, text, { kind = null } = {}) {
+    if (isCliCommand(text)) {
+      await this.prompt(target, text);
+      const info = await this.agentInfo(target);
+      return { delivered: Boolean(info), state: info ? info.agent_status ?? 'unknown' : 'chiuso', retried: null, verified: false };
+    }
+    let before = await this.agentInfo(target);
+    const shown = await this.screen(target);
+    await this.prompt(target, text);
+    let s = await this.settle(target, before);
+    if (s.state === 'blocked') await this.failIfRestarted(target, kind);
+    if (s.took || s.state === 'chiuso') return { delivered: s.took, state: s.state, retried: null, verified: true };
+    const onScreen = showsTask(await this.screen(target), text, shown);
+    if (s.state === 'unknown' && onScreen) return { delivered: true, state: s.state, retried: null, verified: false };
+    const retried = onScreen ? 'enter' : 'text';
+    before = await this.agentInfo(target);
+    if (retried === 'enter') await this.exec(['agent', 'send-keys', target, 'enter']);
+    else await this.prompt(target, text);
+    s = await this.settle(target, before);
+    if (s.state === 'blocked') await this.failIfRestarted(target, kind);
+    if (s.took || s.state === 'chiuso') return { delivered: s.took, state: s.state, retried, verified: true };
+    if (s.state === 'unknown' && showsTask(await this.screen(target), text, shown)) return { delivered: true, state: s.state, retried, verified: false };
+    return { delivered: false, state: s.state, retried, verified: true };
+  }
+
+  /** blocked on the folder-trust dialog right after a send: thrown as agent_blocked, the text did not arrive. */
+  async failIfRestarted(target, kind) {
+    if (!kind || !readTrustDialog(kind, await this.screen(target), '').dialog) return;
+    const e = new HarmaError(`${target} si è riavviato e aspetta la fiducia nella cartella: il testo non è arrivato`);
+    e.code = 'agent_blocked';
+    throw e;
+  }
+
+  /** Did the agent take what was just sent? {took, state}, after settleMs at most ('chiuso' if herdr lost it). */
+  async settle(target, before) {
+    const deadline = Date.now() + this.settleMs;
+    for (;;) {
+      const info = await this.agentInfo(target);
+      if (!info) return { took: false, state: 'chiuso' };
+      const state = info.agent_status ?? 'unknown';
+      const moved = before?.state_change_seq == null || info.state_change_seq !== before.state_change_seq;
+      // herdr numbers finished turns: one more since the send is a turn the text started, even one that ended between two looks.
+      const finished = before != null && info.completion_seq != null && info.completion_seq !== before.completion_seq;
+      const took = state === 'working' || state === 'blocked' || finished || (state === 'done' && (before?.agent_status !== 'done' || moved));
+      if (took || Date.now() >= deadline) return { took, state };
+      await sleep(this.settlePollMs);
+    }
+  }
+
+  /** Wait until the agent stops: idle, done or blocked. Returns its state, or null after timeoutSec. */
+  async waitStopped(target, timeoutSec) {
+    const res = await this.exec(['agent', 'wait', target, '--timeout', String(timeoutSec * 1000)], { timeout: (timeoutSec + 30) * 1000 });
+    return res.ok ? parseJson(res.stdout)?.result?.agent?.agent_status ?? null : null;
   }
 
   async read(target, lines = 120) {

@@ -1,19 +1,20 @@
-import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync, cpSync } from 'node:fs';
-import { resolve, join, dirname } from 'node:path';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync, cpSync, rmSync } from 'node:fs';
+import { resolve, join, dirname, basename } from 'node:path';
 import { loadCatalog, harnesses } from './catalog.mjs';
 import { parseTarget, effortValues, launchSpec, resumeArgv, meta, herdrKind, headlessOf, headlessSpec } from './harness.mjs';
 import {
   projectRoot, loadConfig, saveConfig, appendEvent, readEvents, agentsFromEvents,
-  writeCache, readCache, hasProject, DEFAULT_CONFIG, ensureGitignore,
+  writeCache, readCache, hasProject, DEFAULT_CONFIG, ensureGitignore, readText,
 } from './state.mjs';
 import { AGY_NEON, agyModelIds, inventory } from './inventory.mjs';
 import { collectCredits } from './credits.mjs';
 import { rankRows, refreshFromAA } from './rank.mjs';
 import { route, taskProfile, TASK_PROFILES } from './route.mjs';
-import { selectBackend, HerdrBackend, HcBackend, projectId, checkAgentName, LAYOUTS } from './backends.mjs';
+import { selectBackend, HerdrBackend, HcBackend, projectId, checkAgentName, isCliCommand, LAYOUTS } from './backends.mjs';
 import { trustableFolder, trustPolicy, TRUST_LEVELS, readTrustDialog } from './trust.mjs';
 import { answerPolicy, answerGate, ANSWER_LEVELS, ANSWER_KINDS } from './answers.mjs';
 import { usageFor, estimateCost, findCodexSession } from './usage.mjs';
+import { museSessions, findMuseSession, replacedMuseSession } from './sessions.mjs';
 import { table, HarmaError, now, which, readJson, run, shq } from './util.mjs';
 import { modelOptions, selectionRows, applySelection, parseSetSpec, describe, describePick, ORCHESTRATOR, rosterPicks, choosePick } from './roster.mjs';
 import { initState, runTui } from './tui.mjs';
@@ -21,7 +22,8 @@ import { statePath } from './state.mjs';
 import { fileURLToPath } from 'node:url';
 
 export const EXIT_NEEDS_CONFIRM = 3;
-export const EXIT_BLOCKED = 4; // agent started, waiting on a dialog; task not delivered
+export const EXIT_BLOCKED = 4; // agent waits on a dialog, or a task did not reach it
+export const EXIT_STILL_WORKING = 5; // harma wait ran out of time
 const CREDIT_TTL_MS = 15 * 60_000;
 const HEADLESS_MAX_SEC = 3600; // a headless job is stopped after an hour unless --max-time says otherwise
 
@@ -397,17 +399,20 @@ export async function cmdDispatch(flags, opts = {}) {
     mode: headless ? 'headless' : 'interactive', machine,
     prompt_chars: prompt?.length ?? 0, policy: cfg.dispatch_policy,
     layout: flags.worktree ? 'worktree' : (flags.layout ?? cfg.herdr?.layout ?? 'auto'),
-    worktree: flags.worktree ? { branch: flags.branch ?? `harma/${flags.name}` } : null,
+    worktree: flags.worktree ? { branch: flags.branch ?? `harma/${flags.name}`, ...(flags.base ? { base: flags.base } : {}) } : null,
     trust: trustPolicy(cfg, readEvents(c.root)),
   };
+  if (flags.base && !flags.worktree) throw new HarmaError('--base vale solo con --worktree', { hint: `harma dispatch --name ${flags.name} … --worktree --base ${flags.base}` });
+  if (plan.worktree?.base && !machine) Object.assign(plan.worktree, await baseOf(c, plan.worktree.base));
   if (plan.worktree && !machine) {
-    const check = await worktreeCheck(c, cfg);
+    const check = await worktreeCheck(c, cfg, plan.worktree);
     plan.uncommitted = check.uncommitted;
     notes.push(...check.notes);
   }
   if (plan.worktree && machine && cfg.worktree_copy?.length) notes.push(`worktree_copy non si applica su ${machine}: i file restano su questa macchina`);
   const trustBy = headless ? 'non serve' : machine ? 'la dà l\'utente (altra macchina)'
-    : plan.trust === 'on' || (plan.trust === 'worktrees' && plan.worktree) ? `la dà harma (policy trust ${plan.trust})` : 'la dà l\'utente';
+    : plan.worktree?.base_own === false ? `la dà l'utente (${plan.worktree.base} non è in un branch del progetto)`
+      : plan.trust === 'on' || (plan.trust === 'worktrees' && plan.worktree) ? `la dà harma (policy trust ${plan.trust})` : 'la dà l\'utente';
 
   const gate = await dispatchGate(c, cfg, pick.harness, flags, opts);
   if (!gate.allowed) {
@@ -417,7 +422,7 @@ export async function cmdDispatch(flags, opts = {}) {
       `Agente ${plan.agent}: ${plan.harness}:${plan.model} @ ${plan.effort ?? 'default'} (${plan.why})`,
       `Comando: ${plan.argv.join(' ')}${hs ? ` ${promptHint(hs.prompt)}` : ''}${Object.keys(plan.env).length ? `  env ${JSON.stringify(plan.env)}` : ''}`,
       `Modo: ${headless ? 'non interattivo (un compito, una risposta; nessuno risponde alle richieste di permesso)' : 'interattivo'}${machine ? ` · macchina: ${machine}` : ''}`,
-      `Dove: ${plan.worktree ? `worktree su branch ${plan.worktree.branch}` : `layout ${plan.layout}`} · fiducia nella cartella: ${trustBy}`,
+      `Dove: ${plan.worktree ? `worktree su branch ${plan.worktree.branch}${plan.worktree.base ? ` da ${plan.worktree.base}` : ''}` : `layout ${plan.layout}`} · fiducia nella cartella: ${trustBy}`,
       ...plan.notes.map((n) => `Nota: ${n}`),
       'Se l\'utente approva, ripeti lo stesso comando con --yes.',
     ].join('\n'));
@@ -437,6 +442,8 @@ export async function cmdDispatch(flags, opts = {}) {
   const layout = plan.layout === 'worktree' ? undefined : plan.layout;
   // Files git does not track (e.g. .env) go into a new worktree before the agent starts.
   const prepareWorktree = plan.worktree && !machine && cfg.worktree_copy?.length ? (path) => copyIntoWorktree(c.root, path, cfg.worktree_copy) : null;
+  // Muse lists its running sessions: the agent's is the one that appears now.
+  const museBefore = pick.harness === 'muse' && !headless && !machine ? (await museSessions(c.env)).map((x) => x.sessionId) : [];
   let runDir = null;
   let started;
   if (headless) {
@@ -463,42 +470,66 @@ export async function cmdDispatch(flags, opts = {}) {
     });
   }
   rememberWorkspace(c, cfg, started);
+  // Where the worktree started from, and whether that code is the project's own: maybeTrust reads it, and so does resume.
+  if (started.worktree && plan.worktree?.base) {
+    const { base, base_commit = null, base_own = null } = plan.worktree;
+    Object.assign(started.worktree, { base, base_commit, base_own });
+  }
   const agentCwd = started.cwd ?? cwd;
   appendEvent(c.root, {
     type: 'started', agent: flags.name, harness: pick.harness, model: pick.model, effort: pick.effort,
     task_type: flags['task-type'] ?? null, backend: backend.name, target: targetOf(started), mode: plan.mode, run_dir: runDir,
     cwd: agentCwd, worktree: started.worktree ?? null, session_id: spec.sessionId, why: pick.why, confirmed_by: gate.by, started_ms: startedMs,
+    ...(museBefore.length ? { muse_before: museBefore } : {}),
   });
+  if (flags.keep) appendEvent(c.root, { type: 'keep', agent: flags.name, on: true, by: 'dispatch --keep' });
   if (headless) return headlessStarted(c, flags, { plan, started, pick, backend, runDir, sid: spec.sessionId, prompt, pollMs: opts.pollMs });
   const trusted = await maybeTrust(c, cfg, backend, { agent: flags.name, harness: pick.harness, cwd: agentCwd, started });
-  let sid = spec.sessionId ?? await discoverSession(backend, { name: started.target, harness: pick.harness, cwd: agentCwd, sinceMs: startedMs, env: c.env });
-  if (sid && sid !== spec.sessionId) appendEvent(c.root, { type: 'session', agent: flags.name, session_id: sid, source: backend.name });
+  const look = { name: started.target, harness: pick.harness, cwd: agentCwd, sinceMs: startedMs, env: c.env, exclude: [...knownSessions(c.root), ...museBefore] };
+  let sid = spec.sessionId ?? await discoverSession(backend, look);
+  if (sid && sid !== spec.sessionId) appendEvent(c.root, { type: 'session', agent: flags.name, session_id: sid, source: sessionSource(backend, pick.harness) });
   let promptState = prompt ? 'sent' : 'none';
+  let delivery = null;
   if (prompt) {
     try {
-      await backend.prompt(started.target, prompt, { wait: Boolean(flags.wait), timeoutSec: Number(flags.timeout ?? 600) });
-      appendEvent(c.root, { type: 'prompted', agent: flags.name, chars: prompt.length });
+      delivery = await deliverTask(backend, started.target, prompt, { wait: Boolean(flags.wait), timeoutSec: Number(flags.timeout ?? 600), harness: pick.harness });
+      if (delivery.delivered) appendEvent(c.root, { type: 'prompted', agent: flags.name, chars: prompt.length, retried: delivery.retried, ...unverified(delivery) });
+      else {
+        promptState = 'lost';
+        keepAside(c, flags.name, prompt, `l'agente ${notTaken(delivery)}`);
+      }
     } catch (e) {
       if (e.code !== 'agent_blocked') throw e;
-      // Started and recorded, but waiting on a dialog (e.g. folder trust): the user must answer it.
+      // Started and recorded, but waiting on a dialog (e.g. folder trust): the task waits for it.
       promptState = 'blocked';
       appendEvent(c.root, { type: 'blocked', agent: flags.name, detail: 'prompt non inviato: l\'agente aspetta un input' });
+      keepAside(c, flags.name, prompt, 'l\'agente aspettava una risposta');
     }
   }
   if (!sid && promptState === 'sent') {
     // Codex registers its session on the first turn: look again now.
-    sid = await discoverSession(backend, { name: started.target, harness: pick.harness, cwd: agentCwd, sinceMs: startedMs, env: c.env });
-    if (sid) appendEvent(c.root, { type: 'session', agent: flags.name, session_id: sid, source: backend.name });
+    sid = await discoverSession(backend, look);
+    if (sid) appendEvent(c.root, { type: 'session', agent: flags.name, session_id: sid, source: sessionSource(backend, pick.harness) });
+  } else if (sid && sid !== spec.sessionId && pick.harness === 'muse' && !machine) {
+    // Found before the task went out: a Muse that restarted since (after updating itself) runs a new session.
+    const fresh = await replacedMuseSession({ env: c.env, cwd: agentCwd, sid, exclude: look.exclude });
+    if (fresh) {
+      sid = fresh;
+      appendEvent(c.root, { type: 'session', agent: flags.name, session_id: sid, source: sessionSource(backend, pick.harness) });
+    }
   }
-  const result = { started: true, plan, target: started, session_id: sid ?? null, prompt: promptState, trust: trusted, exitCode: promptState === 'blocked' ? EXIT_BLOCKED : 0 };
+  const undelivered = promptState === 'blocked' || promptState === 'lost';
+  const result = { started: true, plan, target: started, session_id: sid ?? null, prompt: promptState, delivery, pending: undelivered, keep: Boolean(flags.keep), trust: trusted, exitCode: undelivered ? EXIT_BLOCKED : 0 };
   emit(c, flags, result, () => [
     `Avviato ${flags.name}: ${pick.harness}:${pick.model} @ ${pick.effort ?? 'default'} su ${backend.name} (${where(started)})`,
     ...worktreeLines(started),
     ...(trusted ? [`Fiducia nella cartella: ${trusted.ok ? `data da harma (policy trust ${trustPolicy(cfg, readEvents(c.root))})` : `non data — ${trusted.detail}`}`] : []),
     `Sessione: ${sid ?? 'non ancora nota (verrà letta alla chiusura)'}`,
-    promptState === 'sent' ? `Compito inviato (${prompt.length} caratteri)${flags.wait ? '; atteso fino a stato stabile' : ''}.`
-      : promptState === 'blocked' ? `BLOCCATO: ${flags.name} aspetta una risposta (es. fiducia nella cartella) e il compito NON è stato inviato.\nLeggi con: harma read ${flags.name} --lines 40. Il dialogo di fiducia nella cartella segue harma trust: chiedi all'utente di rispondere nel suo terminale. Un'altra domanda: harma answer ${flags.name} (policy answers ${answerPolicy(cfg)}). Poi: harma send ${flags.name} "<compito>" --yes`
-        : 'Nessun compito inviato: usa harma send.',
+    promptState === 'sent' ? `Compito consegnato (${prompt.length} caratteri)${retryNote(delivery)}${flags.wait ? '; atteso fino a stato stabile' : ''}.`
+      : promptState === 'blocked' ? `BLOCCATO: ${flags.name} aspetta una risposta (es. fiducia nella cartella) e il compito NON è stato consegnato: harma lo tiene da parte.\nLeggi con: harma read ${flags.name} --lines 40. Il dialogo di fiducia nella cartella segue harma trust: chiedi all'utente di rispondere nel suo terminale. Un'altra domanda: harma answer ${flags.name} (policy answers ${answerPolicy(cfg)}). Poi harma wait ${flags.name} consegna il compito appena l'agente è libero (oppure harma send ${flags.name} --pending).`
+        : promptState === 'lost' ? `COMPITO NON PARTITO: ${flags.name} ${notTaken(delivery)}; harma tiene da parte il compito.\nLeggi lo schermo con harma read ${flags.name} --lines 40, poi harma send ${flags.name} --pending.`
+          : 'Nessun compito inviato: usa harma send.',
+    ...(flags.keep ? [`Tenuto: harma cleanup non chiude ${flags.name} finché non lo nomini (harma keep ${flags.name} --off per togliere il segno).`] : []),
     ...plan.notes.map((n) => `Nota: ${n}`),
   ].join('\n'));
   return result;
@@ -516,7 +547,8 @@ function worktreeLines(started) {
   const w = started.worktree;
   if (!w) return [];
   return [
-    `Worktree: ${w.path} (branch ${w.branch})`,
+    `Worktree: ${w.path} (branch ${w.branch}${w.base ? `, da ${w.base}` : ''})`,
+    ...(w.base_own === false ? [`Fiducia nella cartella: ${w.base} non è in un branch del progetto, quindi il dialogo di fiducia lo lascia all'utente`] : []),
     ...(w.copy?.copied.length ? [`Copiati nel worktree: ${w.copy.copied.join(', ')}`] : []),
     ...(w.copy?.skipped.length ? [`Non copiati: ${w.copy.skipped.join('; ')}`] : []),
   ];
@@ -527,15 +559,16 @@ function worktreeLines(started) {
  * commit, so uncommitted changes stay behind (harma's own .harma/ excepted),
  * and files git ignores, such as .env, are missing unless worktree_copy lists them.
  */
-async function worktreeCheck(c, cfg) {
+async function worktreeCheck(c, cfg, worktree = {}) {
   const notes = [];
+  if (worktree.base) notes.push(`il worktree parte da ${worktree.base} (${String(worktree.base_commit ?? '').slice(0, 7)}), non dal lavoro nella cartella del progetto`);
   if (!which('git', c.env)) return { uncommitted: null, notes };
   const st = await run('git', ['-C', c.root, 'status', '--porcelain', '--untracked-files=all'], { env: c.env });
   if (!st.ok) return { uncommitted: null, notes };
   const lines = st.stdout.split('\n').filter(Boolean).filter((l) => !l.slice(3).startsWith('.harma/'));
   const untracked = lines.filter((l) => l.startsWith('??')).length;
   const changed = lines.length - untracked;
-  if (changed || untracked) {
+  if ((changed || untracked) && !worktree.base) {
     const parts = [changed ? `${changed} file modificati` : null, untracked ? `${untracked} file nuovi` : null].filter(Boolean).join(' e ');
     notes.push(`il worktree parte dall'ultimo commit: ${parts} non committati non ci saranno. Se all'agente servono, committali prima; per una review del lavoro in corso, non usare --worktree`);
   }
@@ -544,6 +577,33 @@ async function worktreeCheck(c, cfg) {
   const missing = env.ok ? env.stdout.split('\n').filter((f) => f && !f.includes('/') && !copy.includes(f)) : [];
   if (missing.length) notes.push(`${missing.join(', ')}: git non li traccia, quindi nel worktree mancheranno. Per copiarli in ogni worktree: harma worktree --copy "${[...copy, ...missing].join(',')}"`);
   return { uncommitted: { changed, untracked }, notes };
+}
+
+/**
+ * The commit a worktree starts from (--base), and whether it is the
+ * project's own: already in a branch on origin, in a tag, or in a local
+ * branch that doesn't track another remote and isn't a worktree harma made
+ * from foreign code. A pull request from a fork (refs/pull/…, another
+ * remote, the branch gh pr checkout makes for it) is not: when the agent's
+ * CLI trusts the folder, that code can load hooks and settings.
+ */
+async function baseOf(c, ref) {
+  if (!which('git', c.env)) throw new HarmaError('--base richiede git');
+  const sha = await run('git', ['-C', c.root, 'rev-parse', '--verify', '--quiet', `${ref}^{commit}`], { env: c.env });
+  const commit = sha.ok ? sha.stdout.trim() : '';
+  if (!commit) {
+    throw new HarmaError(`--base: ${ref} non è un commit di questo repository`, {
+      hint: 'Per il branch di una pull request: git fetch origin <branch>, poi --base origin/<branch>',
+    });
+  }
+  const foreign = new Set(agentsFromEvents(readEvents(c.root)).filter((a) => a.worktree?.base_own === false).map((a) => `refs/heads/${a.worktree.branch}`));
+  const refs = await run('git', ['-C', c.root, 'for-each-ref', '--contains', commit, '--format=%(refname)%09%(upstream:remotename)', 'refs/heads', 'refs/remotes/origin', 'refs/tags'], { env: c.env });
+  const own = refs.ok && refs.stdout.split('\n').filter(Boolean).some((line) => {
+    const [name, remote = ''] = line.split('\t');
+    if (name.startsWith('refs/remotes/origin/') || name.startsWith('refs/tags/')) return true;
+    return name.startsWith('refs/heads/') && ['', 'origin'].includes(remote) && !foreign.has(name);
+  });
+  return { base_commit: commit, base_own: own };
 }
 
 /** Copy the listed paths from the project into a new worktree; never overwrite a file already there. */
@@ -642,10 +702,14 @@ async function maybeTrust(c, cfg, backend, { agent, harness, cwd, started }) {
   if (!started.blocked || level === 'off' || started.machine || typeof backend.answerTrust !== 'function') return null;
   const wt = started.worktree?.path ?? null;
   if (level === 'worktrees' && !wt) return null; // the project folder stays with the user
-  const allowed = level === 'on' ? trustableFolder(cwd, c.root, wt) : trustableFolder(cwd, wt);
+  // A worktree from code that isn't the project's own (a fork's pull request) stays with the user, under any policy.
+  const foreign = wt && started.worktree.base && started.worktree.base_own !== true;
+  const allowed = !foreign && (level === 'on' ? trustableFolder(cwd, c.root, wt) : trustableFolder(cwd, wt));
+  // The dialog is the CLI's own: a Claude Code variant (claude-zai, …) shows Claude Code's.
   const res = allowed
-    ? await backend.answerTrust({ target: started.target, harness, cwd })
-    : { ok: false, detail: `${cwd} è fuori ${level === 'on' ? 'dal progetto' : 'dal worktree dell\'agente'}` };
+    ? await backend.answerTrust({ target: started.target, harness: herdrKind(harness) ?? harness, cwd })
+    : foreign ? { ok: false, detail: `il worktree parte da ${started.worktree.base}, che non è in un branch del progetto: la fiducia la dà l'utente` }
+      : { ok: false, detail: `${cwd} è fuori ${level === 'on' ? 'dal progetto' : 'dal worktree dell\'agente'}` };
   appendEvent(c.root, { type: res.ok ? 'trusted' : 'trust_skipped', agent, cwd, detail: res.detail, by: `policy trust ${level}` });
   if (res.ok) started.blocked = false;
   return res;
@@ -664,16 +728,130 @@ async function dispatchGate(c, cfg, harness, flags, opts) {
   return { allowed: false, reason: `policy auto-within-budget: crediti ${harness} ${row?.status ?? 'sconosciuti'}` };
 }
 
-async function discoverSession(backend, { name, harness, cwd, sinceMs, env }) {
+async function discoverSession(backend, { name, harness, cwd, sinceMs, env, exclude = [] }) {
   if (backend.name === 'herdr') {
     try {
       const live = (await backend.list()).find((a) => a.name === name || a.target === name);
       if (live?.sessionId) return live.sessionId;
     } catch { /* fall through */ }
   }
-  // Codex's own logs are on this machine: no use for an agent on another one.
+  // Codex's logs and Muse's session list are on this machine: no use for an agent on another one.
   if (harness === 'codex' && !backend.machine) return findCodexSession({ env, cwd, sinceMs });
+  if (harness === 'muse' && !backend.machine) return findMuseSession({ env, cwd, exclude });
   return null;
+}
+
+const sessionSource = (backend, harness) => (harness === 'muse' ? 'muse sessions' : backend.name);
+
+/** Every session ID in the registry: an agent's new session is none of these. */
+function knownSessions(root) {
+  return agentsFromEvents(readEvents(root)).map((a) => a.session_id).filter(Boolean);
+}
+
+/**
+ * Send a task to an interactive agent. On herdr harma checks that the agent
+ * took it (see HerdrBackend.deliver); hc only sends.
+ * Returns {delivered, state, retried}.
+ */
+async function deliverTask(backend, target, text, { wait = false, timeoutSec = 600, harness = null } = {}) {
+  if (typeof backend.deliver !== 'function') {
+    await backend.prompt(target, text, { wait, timeoutSec });
+    return { delivered: true, state: null, retried: null, verified: null };
+  }
+  const res = await backend.deliver(target, text, { kind: harness ? herdrKind(harness) : null });
+  res.command = isCliCommand(text);
+  if (res.delivered && wait) res.state = await backend.waitStopped(target, timeoutSec) ?? res.state;
+  return res;
+}
+
+function retryNote(d) {
+  const notes = [];
+  if (d?.retried === 'enter') notes.push('il primo Invio non era arrivato, harma l\'ha ripetuto');
+  if (d?.retried === 'text') notes.push('l\'agente aveva perso il testo (es. si è riavviato dopo un aggiornamento) e harma l\'ha rimandato');
+  if (d?.verified === false) {
+    notes.push(d.state === 'unknown' && !d.command
+      ? 'herdr non legge lo stato di quest\'agente: il testo è sullo schermo, ma che sia partito non è verificato'
+      : 'un comando della CLI può non avviare un turno: inviato una volta, senza controllo');
+  }
+  return notes.length ? `: ${notes.join('; ')}` : '';
+}
+
+/** A delivery herdr's state could not confirm, as the registry records it. */
+const unverified = (d) => (d?.verified === false ? { verified: false } : {});
+
+/** Why a task did not reach its agent, after "<agent> ": it stayed where it was, or herdr no longer has it. */
+const notTaken = (d) => (d?.state === 'chiuso' ? 'non è più in herdr' : 'è rimasto fermo anche dopo il secondo invio');
+
+/** A task that did not reach its agent: kept in .harma/prompts/ until harma wait or send --pending delivers it. */
+function keepAside(c, name, text, reason) {
+  const dir = statePath(c.root, 'prompts');
+  mkdirSync(dir, { recursive: true });
+  ensureGitignore(c.root);
+  const file = join(dir, `${name}-${now().replace(/[:.]/g, '-')}.md`);
+  writeFileSync(file, text);
+  appendEvent(c.root, { type: 'pending', agent: name, file, chars: text.length, reason });
+  return file;
+}
+
+/**
+ * The text of a task kept aside, or null when its file is gone (git clean -X
+ * removes what git ignores). In a project folder that has moved, the file is
+ * looked for under the new path.
+ */
+function pendingText(c, p) {
+  return readText(p.file) ?? readText(statePath(c.root, 'prompts', basename(p.file)));
+}
+
+/** Is the harma that wrote this claim still running? */
+function holderAlive(lock) {
+  try {
+    process.kill(Number(readFileSync(lock, 'utf8').trim()), 0);
+    return true;
+  } catch (e) {
+    return e.code === 'EPERM'; // running, as another user
+  }
+}
+
+/**
+ * Hold an agent's task kept aside while it goes out, so that a harma wait in
+ * the background and a harma send don't both deliver it. Returns
+ * {pending, release} with the task as the registry has it now, {busy: true}
+ * while another harma holds it, or null when nothing is kept aside any more.
+ */
+function claimPending(c, name) {
+  const pendingNow = () => agentsFromEvents(readEvents(c.root)).find((x) => x.name === name)?.pending ?? null;
+  if (!pendingNow()) return null;
+  const dir = statePath(c.root, 'prompts');
+  mkdirSync(dir, { recursive: true });
+  const lock = join(dir, `${name}.sending`);
+  try {
+    writeFileSync(lock, `${process.pid}\n`, { flag: 'wx' });
+  } catch (e) {
+    if (e.code !== 'EEXIST') throw e;
+    if (holderAlive(lock)) return { busy: true };
+    writeFileSync(lock, `${process.pid}\n`); // left by a harma that ended mid-delivery
+  }
+  const release = () => rmSync(lock, { force: true });
+  // Read again under the claim: a delivery that ended just before it has cleared the task.
+  const pending = pendingNow();
+  if (!pending) { release(); return null; }
+  return { pending, release };
+}
+
+/**
+ * A terminal one listing doesn't show may still be there: herdr between two
+ * detections of the agent (Muse restarting after an update), or an hc label
+ * that no longer matches because the project folder moved. Ask the backend
+ * for that one terminal before recording it closed.
+ */
+async function reallyGone(c, cfg, a, opts) {
+  const b = backendOf(c, cfg, a, opts);
+  try {
+    if (typeof b.agentInfo === 'function') return !(await b.agentInfo(a.target?.name ?? a.name));
+    return !findLive(a, await b.list());
+  } catch {
+    return false;
+  }
 }
 
 // send / read ──────────────────────────────────────────────────────────────
@@ -681,33 +859,234 @@ export async function cmdSend(flags, opts = {}) {
   const c = ctx(opts);
   const cfg = loadConfig(c.root, { required: true });
   const [name, ...rest] = flags._;
-  const text = flags['prompt-file'] ? readFileSync(flags['prompt-file'], 'utf8') : rest.join(' ');
   const agent = openAgent(c, name);
   if (agent.mode === 'headless') {
     throw new HarmaError(`${name} è un lavoro non interattivo: ha già il suo compito e non riceve altri messaggi`, {
       hint: `Leggi la risposta con harma read ${name}; per continuare la conversazione: harma cleanup --agent ${name}, poi harma resume ${name}`,
     });
   }
-  if (!text) throw new HarmaError('Manca il testo da inviare');
-  const gate = await dispatchGate(c, cfg, agent.harness, flags, opts);
+  const fromPending = Boolean(flags.pending);
+  if (fromPending && (rest.length || flags['prompt-file'])) throw new HarmaError('--pending manda il compito tenuto da parte: non passare altro testo');
+  if (fromPending && !agent.pending) throw new HarmaError(`${name} non ha un compito tenuto da parte`, { hint: 'Vedi harma status, colonna compito' });
+  let text = fromPending ? null : flags['prompt-file'] ? readFileSync(flags['prompt-file'], 'utf8') : rest.join(' ');
+  if (!fromPending && !text) throw new HarmaError('Manca il testo da inviare');
+  // A task kept aside was approved when it was dispatched or sent: it needs no new yes.
+  const gate = fromPending ? { allowed: true, by: 'consenso già dato a quel compito' } : await dispatchGate(c, cfg, agent.harness, flags, opts);
   if (!gate.allowed) {
     emit(c, flags, { needs_confirmation: true, reason: gate.reason, agent: name, chars: text.length }, () =>
       `CONFERMA RICHIESTA — nulla è stato inviato a ${name}.\nMotivo: ${gate.reason}\nSe l'utente approva, ripeti con --yes.`);
     return { needsConfirmation: true, exitCode: EXIT_NEEDS_CONFIRM };
   }
-  const backend = opts.backend ?? backendFor(agent, cfg, c.env);
-  try {
-    await backend.prompt(agent.target?.name ?? name, text, { wait: Boolean(flags.wait), timeoutSec: Number(flags.timeout ?? 600) });
-  } catch (e) {
-    if (e.code !== 'agent_blocked') throw e;
-    throw new HarmaError(`${name} aspetta una risposta: il messaggio NON è stato inviato`, {
-      exitCode: EXIT_BLOCKED,
-      hint: `Leggi la domanda con harma read ${name} --lines 40 e rispondi con harma answer ${name} --kind question|permission …; poi rimanda il messaggio`,
+  // A task kept aside goes out once: a harma wait in the background may be delivering it right now.
+  const held = agent.pending ? claimPending(c, name) : null;
+  if (held?.busy) {
+    throw new HarmaError(`Il compito tenuto da parte per ${name} sta partendo ora con un altro harma (harma wait)`, {
+      hint: `Vedi harma status, colonna compito${fromPending ? '' : `; poi ripeti harma send ${name}`}`,
     });
   }
-  appendEvent(c.root, { type: 'prompted', agent: name, chars: text.length, confirmed_by: gate.by });
-  c.out(flags.json ? JSON.stringify({ sent: true }) : `Inviato a ${name} (${text.length} caratteri).`);
-  return { sent: true };
+  try {
+    const kept = held?.pending ?? null; // the task kept aside now, if any
+    if (fromPending) {
+      if (!kept) throw new HarmaError(`${name} non ha più un compito tenuto da parte: è appena stato consegnato`, { hint: 'Vedi harma status, colonna compito' });
+      text = pendingText(c, kept);
+      if (text == null) {
+        throw new HarmaError(`Il compito tenuto da parte per ${name} non c'è più: manca il file ${kept.file}`, {
+          hint: `Rimandalo con harma send ${name} "<compito>" --yes: sostituisce quello tenuto da parte`,
+        });
+      }
+      if (!text) throw new HarmaError('Manca il testo da inviare');
+    }
+    const replaced = fromPending ? null : kept;
+    const replacedNote = replaced ? ` Sostituisce il compito tenuto da parte prima (${replaced.chars} caratteri, in ${replaced.file}).` : '';
+    const backend = opts.backend ?? backendFor(agent, cfg, c.env);
+    let delivery;
+    try {
+      delivery = await deliverTask(backend, agent.target?.name ?? name, text, { wait: Boolean(flags.wait), timeoutSec: Number(flags.timeout ?? 600), harness: agent.harness });
+    } catch (e) {
+      if (e.code !== 'agent_blocked') throw e;
+      if (!fromPending) keepAside(c, name, text, 'l\'agente aspettava una risposta');
+      throw new HarmaError(`${name} aspetta una risposta: il messaggio NON è stato consegnato, harma lo tiene da parte.${replacedNote}`, {
+        exitCode: EXIT_BLOCKED,
+        hint: `Leggi la domanda con harma read ${name} --lines 40 e rispondi con harma answer ${name} --kind question|permission …; poi harma wait ${name} consegna il messaggio (oppure harma send ${name} --pending)`,
+      });
+    }
+    if (!delivery.delivered) {
+      if (!fromPending) keepAside(c, name, text, `l'agente ${notTaken(delivery)}`);
+      throw new HarmaError(`${name} ${notTaken(delivery)}: il messaggio non è partito, harma lo tiene da parte.${replacedNote}`, {
+        exitCode: EXIT_BLOCKED, hint: `Leggi lo schermo con harma read ${name} --lines 40, poi harma send ${name} --pending`,
+      });
+    }
+    appendEvent(c.root, { type: 'prompted', agent: name, chars: text.length, confirmed_by: gate.by, retried: delivery.retried, pending: fromPending, ...unverified(delivery) });
+    const data = { sent: true, state: delivery.state, retried: delivery.retried, verified: delivery.verified ?? null, replaced_pending: replaced?.file ?? null };
+    emit(c, flags, data, () => [
+      `Consegnato a ${name} (${text.length} caratteri${fromPending ? ', il compito tenuto da parte' : ''})${retryNote(delivery)}.`,
+      ...(replaced ? [`Nota: il compito tenuto da parte (${replaced.chars} caratteri) non verrà più consegnato: questo messaggio lo sostituisce. Se serve ancora: harma send ${name} --prompt-file ${replaced.file} --yes`] : []),
+    ].join('\n'));
+    return data;
+  } finally {
+    held?.release?.();
+  }
+}
+
+/** Mark an open agent so that cleanup leaves it open until it is named, or unmark it. */
+export async function cmdKeep(flags, opts = {}) {
+  const c = ctx(opts);
+  loadConfig(c.root, { required: true });
+  const name = flags._[0];
+  openAgent(c, name);
+  const on = !flags.off;
+  appendEvent(c.root, { type: 'keep', agent: name, on, by: on ? 'harma keep' : 'harma keep --off' });
+  emit(c, flags, { agent: name, keep: on }, () => (on
+    ? `${name} resta aperto: harma cleanup lo salta finché non lo nomini (cleanup --agent ${name}) o non togli il segno (harma keep ${name} --off).`
+    : `${name} non è più tenuto: harma cleanup lo chiude quando ha finito.`));
+  return { agent: name, keep: on };
+}
+
+/**
+ * Wait until agents stop: idle or done at two checks in a row, a headless
+ * job with its result, or a terminal that is gone. A task kept aside is
+ * delivered as soon as its agent is free. An agent that waits on a question
+ * or a permission ends the wait (exit 4), so the orchestrator can answer;
+ * the folder-trust dialog doesn't, since the user answers it.
+ */
+export async function cmdWait(flags, opts = {}) {
+  const c = ctx(opts);
+  const cfg = loadConfig(c.root, { required: true });
+  const known = agentsFromEvents(readEvents(c.root));
+  // A named agent that closed meanwhile has stopped: only a name harma doesn't know is an error.
+  for (const n of flags._) {
+    if (!known.some((a) => a.name === n)) throw new HarmaError(`Agente sconosciuto: ${n}`, { hint: 'Vedi harma status' });
+  }
+  const names = flags._.length ? flags._ : known.filter((a) => a.state === 'open').map((a) => a.name);
+  if (!names.length) {
+    emit(c, flags, { agents: [] }, () => 'Nessun agente aperto.');
+    return { agents: [] };
+  }
+  const timeoutSec = Number(flags.timeout ?? 540);
+  if (!Number.isFinite(timeoutSec) || timeoutSec < 0) throw new HarmaError(`--timeout vuole i secondi, es. --timeout 540 (non «${flags.timeout}»)`);
+  const pollMs = opts.pollMs ?? 5000;
+  const deadline = Date.now() + timeoutSec * 1000;
+  const calm = {};
+  let rows;
+  for (let first = true; ; first = false) {
+    // The last look falls on the deadline, not after it.
+    if (!first) await new Promise((r) => setTimeout(r, Math.min(pollMs, Math.max(0, deadline - Date.now()))));
+    const agents = agentsFromEvents(readEvents(c.root)).filter((a) => names.includes(a.name));
+    const live = await liveByBackend(c, cfg, agents, opts);
+    rows = [];
+    for (const a of agents) rows.push(await waitRow(c, cfg, a, live, calm, opts));
+    const act = rows.filter((r) => r.act);
+    const done = flags.any ? rows.some((r) => r.stopped) : rows.every((r) => r.stopped);
+    if (act.length || done || Date.now() >= deadline) break;
+  }
+  const act = rows.filter((r) => r.act);
+  const busy = rows.filter((r) => !r.stopped);
+  const exitCode = act.length ? EXIT_BLOCKED : (flags.any ? rows.some((r) => r.stopped) : !busy.length) ? 0 : EXIT_STILL_WORKING;
+  const data = { agents: rows, timed_out: exitCode === EXIT_STILL_WORKING, exitCode };
+  // Out of time: who still works, and who has not stopped for another reason (the user's trust dialog, an unreachable backend).
+  const working = busy.filter((r) => r.state === 'working');
+  const other = busy.filter((r) => r.state !== 'working');
+  emit(c, flags, data, () => [
+    table(rows.map((r) => ({ agente: r.agent, stato: r.state, nota: r.note ?? '' }))),
+    ...act.map((r) => r.next),
+    ...(exitCode === EXIT_STILL_WORKING ? [
+      ...(working.length ? [`Dopo ${timeoutSec} s lavorano ancora: ${working.map((r) => r.agent).join(', ')}.`] : []),
+      ...(other.length ? [`Dopo ${timeoutSec} s non si sono ancora fermati: ${other.map((r) => `${r.agent} (${r.note ?? r.state})`).join(', ')}.`] : []),
+      'Ripeti harma wait per continuare ad aspettare.',
+    ] : []),
+  ].join('\n'));
+  return data;
+}
+
+/** One agent's line in harma wait: {agent, state, stopped, act, note, next}. */
+async function waitRow(c, cfg, a, live, calm, opts) {
+  const row = (state, extra = {}) => ({ agent: a.name, state, stopped: false, act: false, note: null, next: null, ...extra });
+  if (a.state !== 'open') return row('chiuso', { stopped: true });
+  const list = live[liveKey(a)];
+  if (!list) return row('backend non raggiungibile');
+  if (!findLive(a, list)) {
+    if (!(await reallyGone(c, cfg, a, opts))) return row('non trovato', { note: 'non elencato dal backend, ma ancora lì' });
+    closeGone(c, a);
+    return row('chiuso', { stopped: true, note: 'terminale chiuso fuori da harma' });
+  }
+  const state = statusOf(a, live);
+  if (a.mode === 'headless') return row(state, { stopped: Boolean(runResult(a)) });
+  const backend = backendOf(c, cfg, a, opts);
+  const target = a.target?.name ?? a.name;
+  const kind = herdrKind(a.harness);
+  // The folder-trust dialog is the user's: the wait goes on through it.
+  const onTrustDialog = async () => Boolean(kind && typeof backend.screen === 'function' && readTrustDialog(kind, await backend.screen(target), a.cwd).dialog);
+  const userTrusts = () => {
+    calm[a.name] = 0;
+    return row('blocked', { note: 'aspetta che l\'utente dia fiducia alla cartella' });
+  };
+  if (state === 'blocked') {
+    if (await onTrustDialog()) return userTrusts();
+    return row(state, {
+      stopped: true, act: true, note: 'aspetta una risposta',
+      next: `${a.name} aspetta una risposta: leggila con harma read ${a.name} --lines 40 e rispondi con harma answer ${a.name} (policy answers ${answerPolicy(cfg)}).${a.pending ? ' Il compito tenuto da parte parte dopo, con harma wait.' : ''}`,
+    });
+  }
+  if (['idle', 'done'].includes(state) && a.pending?.tried) {
+    // One automatic try: an agent that didn't take the task then won't take it on every wait.
+    return row(state, {
+      stopped: true, act: true, note: 'compito tenuto da parte: harma wait l\'ha già provato',
+      next: `${a.name} non ha preso il compito tenuto da parte nemmeno con harma wait: leggi lo schermo con harma read ${a.name} --lines 40; quando è pronto, harma send ${a.name} --pending.`,
+    });
+  }
+  if (['idle', 'done'].includes(state) && a.pending) {
+    const held = claimPending(c, a.name);
+    if (held?.busy) return row(state, { note: 'compito tenuto da parte: sta partendo con un altro harma' });
+    if (!held) {
+      calm[a.name] = 0;
+      return row(state, { note: 'compito tenuto da parte già consegnato' });
+    }
+    try {
+      const text = pendingText(c, held.pending);
+      if (text == null) {
+        return row(state, {
+          stopped: true, act: true, note: 'compito tenuto da parte perso',
+          next: `Il compito tenuto da parte per ${a.name} non c'è più (manca ${held.pending.file}): rimandalo con harma send ${a.name} "<compito>" --yes, che lo sostituisce.`,
+        });
+      }
+      const d = await deliverTask(backend, target, text, { harness: a.harness });
+      if (!d.delivered) {
+        appendEvent(c.root, { type: 'undelivered', agent: a.name, state: d.state, by: 'harma wait' });
+        return row(state, { stopped: true, act: true, note: 'compito non partito', next: `${a.name} ${notTaken(d)}: leggi lo schermo con harma read ${a.name} --lines 40, poi harma send ${a.name} --pending.` });
+      }
+      appendEvent(c.root, { type: 'prompted', agent: a.name, chars: held.pending.chars, confirmed_by: 'consenso già dato a quel compito', retried: d.retried, pending: true, by: 'harma wait', ...unverified(d) });
+      calm[a.name] = 0;
+      return row(d.state, { note: `compito consegnato${retryNote(d)}` });
+    } catch (e) {
+      if (e.code === 'agent_blocked') {
+        if (await onTrustDialog()) return userTrusts();
+        return row('blocked', { stopped: true, act: true, note: 'aspetta una risposta', next: `${a.name} aspetta una risposta: harma read ${a.name} --lines 40, poi harma answer ${a.name}.` });
+      }
+      if (!(e instanceof HarmaError)) throw e;
+      // One agent's backend error doesn't end the wait for the others.
+      return row(state, { stopped: true, act: true, note: 'consegna fallita', next: `${a.name}: il compito tenuto da parte non è partito (${e.message}). Leggi lo schermo con harma read ${a.name} --lines 40, poi harma send ${a.name} --pending.` });
+    } finally {
+      held.release();
+    }
+  }
+  const still = ['idle', 'done', 'finished'].includes(state);
+  calm[a.name] = still ? (calm[a.name] ?? 0) + 1 : 0;
+  return row(state, { stopped: calm[a.name] >= 2 });
+}
+
+/** The backend object for an agent: the one passed in (tests), when it matches, else the agent's own. */
+function backendOf(c, cfg, a, opts) {
+  return opts.backend?.name === a.backend && (opts.backend.machine ?? null) === (a.target?.machine ?? null) ? opts.backend : backendFor(a, cfg, c.env);
+}
+
+/**
+ * A terminal closed outside harma (herdr answers and no longer has it): the
+ * registry records it closed, with the session ID if harma can still find one.
+ */
+function closeGone(c, a) {
+  const sid = a.session_id ?? (a.harness === 'codex' && !a.target?.machine ? findCodexSession({ env: c.env, cwd: a.cwd, sinceMs: Date.parse(a.started_at) }) : null);
+  if (sid && sid !== a.session_id) appendEvent(c.root, { type: 'session', agent: a.name, session_id: sid, source: 'log codex' });
+  appendEvent(c.root, { type: 'closed', agent: a.name, session_id: sid ?? null, last_status: 'non trovato', by: 'fuori da harma' });
 }
 
 export async function cmdRead(flags, opts = {}) {
@@ -760,9 +1139,15 @@ function statusOf(a, live) {
 export async function cmdStatus(flags, opts = {}) {
   const c = ctx(opts);
   const cfg = loadConfig(c.root, { required: true });
-  const agents = agentsFromEvents(readEvents(c.root));
+  let agents = agentsFromEvents(readEvents(c.root));
   const live = await liveByBackend(c, cfg, agents, opts);
-  const rows = agents.filter((a) => flags.all || a.state === 'open').map((a) => {
+  const gone = [];
+  for (const a of agents.filter((x) => x.state === 'open' && live[liveKey(x)] && !findLive(x, live[liveKey(x)]))) {
+    if (await reallyGone(c, cfg, a, opts)) gone.push(a);
+  }
+  for (const a of gone) closeGone(c, a);
+  if (gone.length) agents = agentsFromEvents(readEvents(c.root));
+  const rows = agents.filter((a) => flags.all || a.state === 'open' || gone.some((g) => g.name === a.name)).map((a) => {
     const l = findLive(a, live[liveKey(a)]);
     return {
       agente: a.name,
@@ -770,17 +1155,22 @@ export async function cmdStatus(flags, opts = {}) {
       effort: a.effort,
       lavoro: a.task_type,
       modo: a.mode === 'headless' ? 'non interattivo' : 'interattivo',
-      registro: a.state === 'open' ? 'aperto' : 'chiuso',
+      registro: a.state === 'open' ? 'aperto' : a.closed_by === 'fuori da harma' ? 'chiuso fuori da harma' : 'chiuso',
       stato: a.state === 'closed' ? '—' : statusOf(a, live),
+      compito: a.state === 'closed' ? '—' : a.pending ? 'NON consegnato' : a.prompted_at ? `consegnato ${ago(a.prompted_at)} fa` : 'nessuno',
+      tenuto: a.keep ? 'sì' : '',
       backend: `${liveKey(a)} ${a.target?.tab ?? a.target?.address ?? ''}`.trim(),
       da: a.started_at ? ago(a.started_at) : null,
       sessione: a.session_id ? a.session_id.slice(0, 8) + '…' : (l?.sessionId ? l.sessionId.slice(0, 8) + '…' : null),
     };
   });
   const data = { orchestrator: cfg.orchestrator, policy: cfg.dispatch_policy, agents: rows };
+  const pending = rows.filter((r) => r.compito === 'NON consegnato').map((r) => r.agente);
   emit(c, flags, data, () => [
     `Orchestratore: ${cfg.orchestrator ? `${cfg.orchestrator.harness}:${cfg.orchestrator.model} @ ${cfg.orchestrator.effort}` : 'non impostato'} · policy ${cfg.dispatch_policy}`,
     table(rows),
+    ...(pending.length ? [`Compiti non consegnati: harma wait ${pending.join(' ')} li consegna appena gli agenti sono liberi.`] : []),
+    ...(gone.length ? [`Chiusi fuori da harma, ora registrati come chiusi: ${gone.map((a) => a.name).join(', ')}.`] : []),
   ].join('\n'));
   return data;
 }
@@ -790,8 +1180,7 @@ async function liveByBackend(c, cfg, agents, opts) {
   for (const a of agents.filter((x) => x.state === 'open')) {
     const key = liveKey(a);
     if (key in out) continue;
-    const b = opts.backend?.name === a.backend && (opts.backend.machine ?? null) === (a.target?.machine ?? null) ? opts.backend : backendFor(a, cfg, c.env);
-    try { out[key] = await b.list(projectId(c.root)); } catch { out[key] = null; }
+    try { out[key] = await backendOf(c, cfg, a, opts).list(projectId(c.root)); } catch { out[key] = null; }
   }
   return out;
 }
@@ -895,6 +1284,15 @@ export async function cmdCleanup(flags, opts = {}) {
     const result = a.mode === 'headless' ? runResult(a) : null;
     const status = result ? resultLabel(result) : (l?.status ?? (live[liveKey(a)] ? 'non trovato' : 'backend non raggiungibile'));
     if (!live[liveKey(a)]) { report.push({ agente: a.name, azione: 'saltato', motivo: status }); continue; }
+    const named = flags.agent === a.name;
+    if (a.keep && !named && status !== 'non trovato') {
+      report.push({ agente: a.name, azione: 'tenuto', motivo: `segnato con harma keep: chiudilo con cleanup --agent ${a.name}, o togli il segno con harma keep ${a.name} --off` });
+      continue;
+    }
+    if (a.pending && !named && !flags.force && status !== 'non trovato') {
+      report.push({ agente: a.name, azione: 'tenuto', motivo: `il suo compito non è ancora stato consegnato: harma wait ${a.name} lo consegna; --agent ${a.name} per chiuderlo` });
+      continue;
+    }
     if (['working', 'blocked'].includes(status) && !flags.force) {
       report.push({ agente: a.name, azione: 'tenuto', motivo: status === 'working' ? 'sta lavorando' : 'aspetta una risposta (blocked): leggilo con harma read' });
       continue;
@@ -902,6 +1300,17 @@ export async function cmdCleanup(flags, opts = {}) {
     let sid = a.session_id ?? result?.session_id ?? l?.sessionId ?? null;
     let source = a.session_id ? 'registro' : result?.session_id ? 'harma _run' : (l?.sessionId ? a.backend : null);
     if (!sid && a.harness === 'codex' && !a.target?.machine) { sid = findCodexSession({ env: c.env, cwd: a.cwd, sinceMs: Date.parse(a.started_at) }); source = sid ? 'log codex' : null; }
+    if (a.harness === 'muse' && a.mode !== 'headless' && !a.target?.machine && status !== 'non trovato') {
+      // Never a session that ran before the agent started (the user's own, an orchestrator's), nor another agent's.
+      const exclude = [...knownSessions(c.root), ...(a.muse_before ?? [])];
+      if (!sid) {
+        sid = await findMuseSession({ env: c.env, cwd: a.cwd, exclude });
+        source = sid ? 'muse sessions' : null;
+      } else if (sid === a.session_id) {
+        const fresh = await replacedMuseSession({ env: c.env, cwd: a.cwd, sid, exclude });
+        if (fresh) { sid = fresh; source = 'muse sessions'; }
+      }
+    }
     // A finished headless job keeps its answer on disk: no session is needed to close it.
     if (!sid && !flags.force && status !== 'non trovato' && !result) {
       report.push({ agente: a.name, azione: 'tenuto', motivo: 'id di sessione non trovato: chiudendo si perde il contesto (usa --force per chiudere comunque)' });
@@ -911,8 +1320,7 @@ export async function cmdCleanup(flags, opts = {}) {
     if (sid && sid !== a.session_id) appendEvent(c.root, { type: 'session', agent: a.name, session_id: sid, source });
     let closed = { ok: true, detail: 'già chiuso nel backend' };
     if (status !== 'non trovato') {
-      const b = opts.backend?.name === a.backend ? opts.backend : backendFor(a, cfg, c.env);
-      closed = await b.close({ ...(a.target ?? {}), target: a.target?.name ?? a.name });
+      closed = await backendOf(c, cfg, a, opts).close({ ...(a.target ?? {}), target: a.target?.name ?? a.name });
     }
     if (closed.ok) appendEvent(c.root, { type: 'closed', agent: a.name, session_id: sid, last_status: status });
     const kept = (closed.ok && a.worktree ? ` · worktree lasciato in ${a.worktree.path} (branch ${a.worktree.branch}): integra il lavoro, poi git worktree remove` : '')

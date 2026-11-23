@@ -6,14 +6,15 @@ import { harnesses } from './catalog.mjs';
 import { HarmaError } from './util.mjs';
 
 // Facts not in the model catalog. Session/resume syntax verified with
-// `claude --help` (2.1.319) and `codex resume --help` (codex-cli 0.167.0).
+// `claude --help` (2.1.319), `codex resume --help` (codex-cli 0.167.0) and
+// `muse resume --help` (Muse Code 1.4.24).
 export const HARNESS_META = {
   claude: { herdrKind: 'claude', codexbar: 'claude', logs: 'claude', presetSession: '--session-id', resume: (id) => ['claude', '--resume', id] },
   codex: { herdrKind: 'codex', codexbar: 'codex', logs: 'codex', resume: (id) => ['codex', 'resume', id] },
   agy: { herdrKind: 'agy', codexbar: 'antigravity' },
   kimi: { herdrKind: 'kimi', codexbar: 'kimi' },
   grok: { herdrKind: 'grok', codexbar: 'grok' },
-  muse: { herdrKind: 'muse', codexbar: 'muse', interactiveBinary: 'muse' },
+  muse: { herdrKind: 'muse', codexbar: 'muse', interactiveBinary: 'muse', resume: (id) => ['muse', 'resume', id] },
   qwen: { herdrKind: 'qwen', codexbar: 'qwencloud' },
   mmx: { codexbar: 'minimax' },
   vibe: { codexbar: 'mistral' },

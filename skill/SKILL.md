@@ -13,7 +13,7 @@ Run it as `harma <command>` when it's installed globally, otherwise as `npx -y h
 
 These rules protect the user's money, their machine and their trust. They hold even when a shortcut looks harmless.
 
-1. **No agent starts without the user's consent.** Every agent you start spends the user's credits and touches their files. `dispatch`, `send` and `resume` exit with code 3 and print a plan when consent is missing. Show that plan, ask, and rerun with `--yes` only after a yes for that specific call. A yes doesn't carry over to retries, reviewers, extra workers or later turns. If the user's own instructions (CLAUDE.md, AGENTS.md) are stricter, follow them. Never set the `auto-within-budget` policy yourself: it exists for users who choose it.
+1. **No agent starts without the user's consent.** Every agent you start spends the user's credits and touches their files. `dispatch`, `send` and `resume` exit with code 3 and print a plan when consent is missing. Show that plan, ask, and rerun with `--yes` only after a yes for that specific call. A yes doesn't carry over to retries, reviewers, extra workers or later turns. The one exception is a task harma kept aside because it didn't reach its agent: `harma wait` and `harma send <name> --pending` deliver that same task under the yes already given. If the user's own instructions (CLAUDE.md, AGENTS.md) are stricter, follow them. Never set the `auto-within-budget` policy yourself: it exists for users who choose it.
 2. **Never invent numbers.** Models, efforts, credits, prices and scores come from harma's output, with their source and date. When harma says `sconosciuto`, tell the user it's unknown. A made-up score or balance leads the user to spend money on a wrong premise.
 3. **Close only what harma opened.** `cleanup` touches only the agents recorded in `.harma/agents.jsonl`. Other panes, tabs, workspaces and servers belong to the user.
 4. **Stay the orchestrator.** Agents report to you. Read and check their work before telling the user something is done, because an agent that says "done" may not be.
@@ -77,7 +77,7 @@ harma dispatch --name <agent-name> --task-type <job> --prompt-file <brief.md> --
 
 With `--task-type` and no `--model`, harma uses the user's list for that job, otherwise the top route candidate. The plan's `why` says which model on the list it took and which it skipped (for example "n.1 … saltato: crediti scarso"). Tell the user when it isn't their first choice. Use `--model <harness>:<model> --effort <level>` only when the user asked for that model.
 
-Where the agent opens: when you run inside herdr, harma opens it in a pane beside yours while both stay usable, then as a tab in your own workspace, so the user sees it next to you; outside herdr, in the project workspace `harma:<project>`. `--layout tab` or `--layout split` force one or the other. For agents that write code in parallel, add `--worktree`: the agent gets its own git checkout on branch `harma/<name>`, so builders don't overwrite each other. Don't use a worktree for reviews or research: it starts from the last commit, so it can't see uncommitted work, and it lacks untracked files such as `.env` and `node_modules`. The plan says what will be missing; pass that on to the user. If the agent needs files such as `.env`, the user can list them once with `harma worktree --copy ".env"` and harma copies them into each new worktree. Review and merge that branch yourself; harma never deletes a worktree that holds work.
+Where the agent opens: when you run inside herdr, harma opens it in a pane beside yours while both stay usable, then as a tab in your own workspace, so the user sees it next to you; outside herdr, in the project workspace `harma:<project>`. `--layout tab` or `--layout split` force one or the other. For agents that write code in parallel, add `--worktree`: the agent gets its own git checkout on branch `harma/<name>`, so builders don't overwrite each other. Don't use a plain worktree for reviews or research: it starts from the last commit, so it can't see uncommitted work, and it lacks untracked files such as `.env` and `node_modules`. To review a pull request whose branch is pushed, `git fetch origin <branch>` and dispatch the reviewer with `--worktree --base origin/<branch>`: harma creates that checkout and answers its folder-trust dialog when the code is already in a branch of the project. For a fork's pull request it leaves that dialog to the user, and the plan says so: tell the user before they approve. The plan says what will be missing; pass that on to the user. If the agent needs files such as `.env`, the user can list them once with `harma worktree --copy ".env"` and harma copies them into each new worktree. Review and merge that branch yourself; harma never deletes a worktree that holds work.
 
 How the agent runs:
 
@@ -85,17 +85,22 @@ How the agent runs:
 - **`--headless`**: one task, one answer, in the CLI's print mode. Use it for extraction, research, or a review whose answer you only need to read. `--wait` prints the answer; otherwise read it with `harma read <name>`. It can't receive more messages. Nobody answers permission requests, so don't use it for work that must write files or run commands. CLIs herdr doesn't drive (`mmx`, `vibe`) always run this way.
 - **`--machine <name> --cwd <folder>`**: the agent runs on another machine's herdr (one listed by `herdr machine list`). Use it only when the user asks for that machine. harma can't check the CLIs there, and the user answers any trust dialog.
 
+harma checks that the agent took the task and sends it once more when the agent lost it (Muse, for one, can restart after updating itself). If the task still doesn't arrive, or a dialog stopped the agent first, `dispatch` exits with code 4 and harma keeps the task aside: `harma wait <name>` delivers it as soon as the agent is free, with no new `--yes`. `wait` tries it once; if it fails again, read the screen and use `harma send <name> --pending` when the agent is ready. When the output says a delivery isn't verified (herdr can't read that agent's state), read the screen before relying on it. Add `--keep` for an agent you'll need again, such as a builder that will get review fixes or a reviewer for more rounds: `cleanup` then leaves it open until you name it.
+
 Name agents in lowercase, unique among open agents (`planner`, `builder`, `review-1`). Write a self-contained brief: the goal, the files, the constraints, what "done" means, and how to report back, for example "write your result to `.harma/out/<name>.md`". The agent starts with none of your context, so anything you leave out of the brief it will guess.
 
 ### 5. Monitor
 
 ```sh
+harma wait <agent-name> [<agent-name>…] --timeout 540 --json
 harma status --json
 harma read <agent-name> --lines 120
 harma send <agent-name> "<follow-up>" --yes
 ```
 
-`blocked` means the agent waits on a question or a permission request: answer it as below. When the trust policy covers the folder (a worktree harma created, or the project with `trust on`), a folder-trust dialog at startup is answered by harma; the dispatch output says so (`Fiducia nella cartella: data`). `idle` or `done` doesn't prove the task is finished, so read the output and check the work.
+Wait with `harma wait`, not with loops of your own. It returns with exit code 0 when the agents stop (`idle` or `done` at two checks in a row), 4 as soon as one waits on a question or a permission (answer it, then wait again), and 5 when the time runs out while they still work (run it again). `--any` returns at the first agent that stops. It waits through a folder-trust dialog, which is the user's, and delivers a task kept aside as soon as its agent is free. Your shell tool has a time limit: keep `--timeout` under it (540 s fits a 10-minute limit), or run `harma wait` in the background where your harness allows and carry on when it ends.
+
+`blocked` means the agent waits on a question or a permission request: answer it as below. When the trust policy covers the folder (a worktree harma created, or the project with `trust on`), a folder-trust dialog at startup is answered by harma; the dispatch output says so (`Fiducia nella cartella: data`). `idle` or `done` only means the agent's turn ended: read the output and check the work before you call the task finished. A file the agent writes when it's done is not enough on its own, since an agent can write it before its last step; wait until the agent has stopped too. In `harma status`, the `compito` column says whether the task reached the agent: `NON consegnato` means harma still keeps it aside.
 
 #### Answer a waiting agent
 
@@ -130,7 +135,7 @@ harma cleanup --dry-run --json
 harma cleanup --json
 ```
 
-harma saves each session id, then closes finished agents. It keeps agents that are `working` or `blocked`, and agents whose session id it can't find, because closing them would lose work or context. Use `--force` only when the user asks. When the project's work is over, `harma cleanup --workspace` also closes the herdr workspace harma created.
+harma saves each session id, then closes finished agents. It keeps agents that are `working` or `blocked`, agents whose session id it can't find, and agents whose task wasn't delivered, because closing them would lose work or context. Use `--force` only when the user asks. It also keeps agents marked with `harma keep <name>` (or dispatched with `--keep`): mark an agent you still need, and close it with `harma cleanup --agent <name>` when its work is over. A tab the user closed is recorded as closed at the next `status`, `wait` or `cleanup`. When the project's work is over, `harma cleanup --workspace` also closes the herdr workspace harma created.
 
 To continue a closed agent's work with its full context, after consent:
 
@@ -143,4 +148,4 @@ harma resume <agent-name> --yes
 Read these only when you need them:
 
 - [references/commands.md](references/commands.md): every command and option, exit codes, files and backends
-- [references/troubleshooting.md](references/troubleshooting.md): exit code 4 and dialogs, no usable model, unknown credits or scores, cleanup that keeps an agent
+- [references/troubleshooting.md](references/troubleshooting.md): exit code 4 (dialogs, a task that didn't start), exit code 5, no usable model, unknown credits or scores, cleanup that keeps an agent

@@ -38,8 +38,8 @@ export function answerGate(level, { kind, option = null, keys = false, confirmed
 }
 
 // The selected line of a choice list: Claude Code marks it with ❯, Codex
-// with ›, Antigravity with >, Gemini-family CLIs with ●.
-const MARK = /^\s*[❯›>●▶▸]\s+(.*\S)\s*$/;
+// with ›, Antigravity with >, Muse with ⟩, Gemini-family CLIs with ●.
+const MARK = /^\s*[❯›>⟩●▶▸]\s+(.*\S)\s*$/;
 
 /** The selected option on a screen: the last marked line (dialogs sit at the bottom). */
 export function selectedOption(screen) {
@@ -52,8 +52,11 @@ export function selectedOption(screen) {
 }
 
 const norm = (s) => String(s).toLowerCase().replace(/\s+/g, ' ').trim();
-const NUMBER = /^(\d+)[.)]\s*/;
-const label = (s) => norm(s).replace(NUMBER, '');
+// "1. Yes" (Claude Code, Codex) or "1  Trust and continue" (Muse): read
+// before spaces are squashed.
+const NUMBER = /^(\d+)(?:[.)]\s*|\s{2,})/;
+const numberOf = (s) => String(s).trim().match(NUMBER)?.[1] ?? null;
+const label = (s) => norm(String(s).trim().replace(NUMBER, ''));
 
 /**
  * Which of `options` (as read on screen) the orchestrator means by `want`:
@@ -63,11 +66,11 @@ const label = (s) => norm(s).replace(NUMBER, '');
 export function pickOption(options, want) {
   const w = norm(want);
   if (/^\d+$/.test(w)) {
-    if (!options.some((o) => NUMBER.test(norm(o)))) return { error: 'le opzioni sullo schermo non sono numerate: indica il testo dell\'opzione' };
-    const i = options.findIndex((o) => norm(o).match(NUMBER)?.[1] === w);
+    if (!options.some((o) => numberOf(o))) return { error: 'le opzioni sullo schermo non sono numerate: indica il testo dell\'opzione' };
+    const i = options.findIndex((o) => numberOf(o) === w);
     return i >= 0 ? { index: i } : { error: `nessuna opzione numero ${w}` };
   }
-  const wl = w.replace(NUMBER, '');
+  const wl = label(want);
   const tiers = [
     (l) => l === wl,
     (l) => l.startsWith(wl),
