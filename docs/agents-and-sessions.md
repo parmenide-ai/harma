@@ -29,6 +29,8 @@ harma knows it runs inside herdr from the variables herdr sets in each pane (`HE
 
 `dispatch --worktree` gives the agent its own git checkout, so agents that write code in parallel don't overwrite each other. herdr creates the worktree on branch `harma/agent_name` (or `--branch`), under its worktrees folder, and opens it as a workspace grouped with the project's in the sidebar. The agent works there; the orchestrator reviews the branch and merges it.
 
+`--base ref` starts the worktree from another branch or commit instead of the project's current one, for example to review a pull request: `git fetch origin feature-x`, then `dispatch --worktree --base origin/feature-x`. The new branch is still `harma/agent_name` (or `--branch`), made from that ref.
+
 Before starting, `dispatch` tells you what the agent won't find there. A worktree starts from the last commit: changes you haven't committed stay in your folder, and the plan counts them (harma's own `.harma/` excepted). Files git doesn't track are missing too; for `.env` files at the project root the plan names them and the command that copies them.
 
 To copy untracked files into every worktree harma creates, list them once:
@@ -91,7 +93,7 @@ harma trust             # shows the policy
 harma trust worktrees   # or: on, off; harma init … --trust-project sets on
 ```
 
-A worktree harma just created holds the project's own committed files, on a branch harma made, so `worktrees` is on by default. With Codex, trusting a worktree means trusting the repository, as Codex's own dialog says. Projects set up before 0.5.0 keep their choice: `trust on` stays `on`, `trust off` stays `off`.
+A worktree harma just created holds the project's own committed files, on a branch harma made, so `worktrees` is on by default. A worktree made with `--base` follows the same rule only when that commit is already the project's own: in a branch on `origin`, in a tag, or in a local branch that doesn't track another remote. A pull request from a fork (`refs/pull/…`, another remote, or the branch `gh pr checkout` makes for it) isn't: once its folder is trusted, the agent's CLI can load that code's hooks and settings, so harma leaves the dialog to you under any policy, and the plan says so before you approve. With Codex, trusting a worktree means trusting the repository, as Codex's own dialog says. Projects set up before 0.5.0 keep their choice: `trust on` stays `on`, `trust off` stays `off`.
 
 When an agent stops at startup and the policy covers its folder, harma reads its screen and answers only if all of these hold:
 
@@ -139,9 +141,14 @@ After pressing Enter, harma waits until the agent leaves `blocked`. If another q
 
 ## The task reaches the agent
 
-`dispatch` and `send` check that the agent took the task: on herdr it has to leave `idle` within 20 seconds, for `working`, `blocked` or `done`. An agent that stays idle lost the text. Muse, for one, updates itself at launch and restarts with an empty prompt. harma then tries once more: it presses Enter again when the text is still in the input box, and sends the whole text again otherwise. The output says when it did.
+`dispatch` and `send` check that the agent took the task: on herdr it has to leave `idle` within 20 seconds, for `working`, `blocked` or `done`, or herdr has to count a finished turn since the send (a turn quick enough to end between two checks). An agent that stays idle lost the text. Muse, for one, updates itself at launch and restarts with an empty prompt. harma then tries once more: it presses Enter again when the text appeared on screen since the send (typed but not submitted), and sends the whole text again otherwise. The output says when it did. If the agent restarts into its folder-trust dialog right after the send, the text is gone: harma keeps it aside as below.
 
-When the task still doesn't arrive, or a dialog stopped the agent first, harma keeps the task aside in `.harma/prompts/` and exits with code 4. `harma status` shows `NON consegnato` in the `compito` column, and `cleanup` leaves the agent open. `harma wait agent_name` delivers the task as soon as the agent is free, for example once you've trusted the folder; `harma send agent_name --pending` delivers it now. Neither needs a new `--yes`, since you approved that task when it was dispatched or sent. A new `send` replaces a task kept aside, and its output says where the old task's file is.
+Two cases herdr's state can't settle:
+
+- **A CLI command** such as `/clear` may start no turn at all, so harma sends it once and doesn't check it
+- **An agent herdr shows as `unknown`**: harma looks at the screen. Text that appeared there counts as delivered, and the output says it isn't verified. harma presses no key for it, since Enter could pick the default option of a dialog herdr can't see. Text that didn't appear is sent once more
+
+When the task still doesn't arrive, or a dialog stopped the agent first, harma keeps the task aside in `.harma/prompts/` and exits with code 4. `harma status` shows `NON consegnato` in the `compito` column, and `cleanup` leaves the agent open. `harma wait agent_name` delivers the task as soon as the agent is free, for example once you've trusted the folder; `harma send agent_name --pending` delivers it now. `wait` tries once: if the agent still doesn't take the task, it stops with code 4, and later waits leave the task to `send --pending`, so that nobody sends it over and over. When a `wait` in the background and a `send` reach the same task, only one delivers it. Neither needs a new `--yes`, since you approved that task when it was dispatched or sent. A new `send` replaces a task kept aside, and its output says where the old task's file is.
 
 On herdr-core, harma sends the task without this check.
 
@@ -156,7 +163,7 @@ harma wait builder reviewer --timeout 540
 | Exit code | When |
 |---|---|
 | 0 | Every agent is `idle` or `done` at two checks in a row, five seconds apart, a headless job has its result, or a terminal has closed. With `--any`, the first agent that stops is enough |
-| 4 | An agent waits on a question or a permission, which the orchestrator answers with `harma answer`; or a task kept aside didn't start even when sent twice |
+| 4 | An agent waits on a question or a permission, which the orchestrator answers with `harma answer`; or a task kept aside didn't start when `wait` sent it, or `wait` had already tried it (then `harma send agent_name --pending`) |
 | 5 | Time ran out (`--timeout`, default 540 seconds) while agents still work: run it again |
 
 `wait` keeps waiting through a folder-trust dialog, which is yours to answer, and delivers a task kept aside as soon as its agent is free. The default timeout stays under the 10-minute limit of an agent's shell tool.
@@ -213,7 +220,7 @@ harma keeps its state in `.harma/` at the project root:
 | Path | Contents |
 |---|---|
 | `.harma/config.json` | Orchestrator, backend, herdr layout and workspaces (also per machine), trust policy, dispatch policy, budgets, thresholds, routing overrides and your model choices (`roster`) |
-| `.harma/agents.jsonl` | Append-only events: `orchestrator`, `started`, `session`, `prompted`, `pending`, `blocked`, `answered`, `answer_policy`, `trusted`, `trust_skipped`, `trust_policy`, `keep`, `closed`, `resumed`, `roster` |
+| `.harma/agents.jsonl` | Append-only events: `orchestrator`, `started`, `session`, `prompted`, `pending`, `undelivered`, `blocked`, `answered`, `answer_policy`, `trusted`, `trust_skipped`, `trust_policy`, `keep`, `closed`, `resumed`, `roster` |
 | `.harma/runs/` | One folder per headless job: `prompt.md`, `job.json`, `output.md`, `stderr.log`, `result.json`; git ignores this folder |
 | `.harma/prompts/` | Tasks kept aside because they didn't reach their agent; git ignores this folder |
 | `.harma/cache/` | Last inventory, credits, ranking and selection status, each with its fetch time; git ignores this folder |

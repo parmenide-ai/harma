@@ -19,7 +19,9 @@ Code 3 isn't an error: harma needs your confirmation before it starts or instruc
 
 ## The task didn't start
 
-`dispatch` or `send` exits with code 4 and says the agent stayed idle even after a second send ("COMPITO NON PARTITO"). The agent was busy with something else, such as restarting after an update or showing a message. Read its screen with `harma read agent_name --lines 40`; once it's ready for input, `harma send agent_name --pending` delivers the task harma kept aside.
+`dispatch` or `send` exits with code 4 and says the agent stayed idle even after a second send ("COMPITO NON PARTITO"). The agent was busy with something else, such as restarting after an update or showing a message. Read its screen with `harma read agent_name --lines 40`; once it's ready for input, `harma send agent_name --pending` delivers the task harma kept aside. `harma wait` tries such a task once; after that it stops with code 4 and leaves it to `send --pending`.
+
+If the task's file in `.harma/prompts/` is gone (for example after `git clean -X`), `wait` and `send --pending` say so: send the task again with `harma send agent_name "…"`, which replaces it.
 
 ## harma wait exits with code 5
 

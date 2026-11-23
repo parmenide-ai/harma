@@ -53,11 +53,12 @@ Scegliere i modelli (l'utente valida o cambia le proposte)
 
 Delegare (con policy "confirm" serve --yes, dopo il consenso dell'utente)
   dispatch --name <n> (--model h:m [--effort e] | --task-type <tipo>) [--prompt "…" | --prompt-file f] [--wait] [--yes]
-           [--layout auto|workspace|tab|split[:right|:down]] [--worktree [--branch b]]
+           [--layout auto|workspace|tab|split[:right|:down]] [--worktree [--branch b] [--base ref]]
            [--headless [--max-time s]] [--machine <macchina herdr> --cwd <cartella là>]
                                  layout auto: dentro herdr un pane accanto all'orchestratore finché c'è
                                  spazio, poi un tab; fuori un workspace per progetto
-                                 --worktree: checkout git separato
+                                 --worktree: checkout git separato; --base: parte da quel branch o commit
+                                 (es. origin/<branch della PR>)
                                  --headless: un compito, una risposta (modo print della CLI), in un pane
                                  --machine: l'agente gira sul server herdr di un'altra macchina
   send <nome> "<testo>" [--wait] [--yes]

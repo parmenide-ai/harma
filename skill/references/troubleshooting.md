@@ -11,7 +11,7 @@ The agent waits on a question, and harma kept the task or message aside. At star
 
 ## Exit code 4: the task didn't start
 
-The agent stayed idle even after harma sent the task twice ("COMPITO NON PARTITO"). Read the screen with `harma read <name> --lines 40`. When the agent is ready for input, `harma send <name> --pending`. If it keeps failing, tell the user what the screen shows.
+The agent stayed idle even after harma sent the task twice ("COMPITO NON PARTITO"). Read the screen with `harma read <name> --lines 40`. When the agent is ready for input, `harma send <name> --pending`. `harma wait` tries a kept task only once, so after a failed try it stops with code 4 instead of sending again. If it keeps failing, tell the user what the screen shows. If harma says the task's file is gone, send the task again with `harma send <name> "…" --yes` after the user's yes.
 
 ## Exit code 5: harma wait ran out of time
 

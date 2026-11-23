@@ -65,12 +65,12 @@ These commands start or instruct an agent, so under the `confirm` policy they ne
 - `--wait`: waits until the agent is idle again; `--timeout seconds` (default 600)
 - `--author harness:model`: with `--task-type review` and no saved choice, excludes that vendor
 - `--layout auto|workspace|tab|split[:right|:down]`: where the agent opens in herdr (default: the project's layout, `auto`: beside the orchestrator while there is room, then a tab)
-- `--worktree [--branch name]`: gives the agent its own git worktree on `harma/agent_name`, or the branch you name (herdr only)
+- `--worktree [--branch name] [--base ref]`: gives the agent its own git worktree on `harma/agent_name`, or the branch you name (herdr only); `--base` starts it from that branch or commit, such as a pull request's `origin/feature-x`. harma answers the folder-trust dialog there only when that commit is already in a branch of the project; see [folder trust](agents-and-sessions.md#folder-trust)
 - `--headless [--max-time seconds]`: runs the task once in the CLI's print mode and keeps the answer in `.harma/runs/`; needs `--prompt` or `--prompt-file`; see [headless jobs](agents-and-sessions.md#headless-jobs)
 - `--machine name --cwd folder`: runs the agent on another machine's herdr server, in that folder; see [another machine](agents-and-sessions.md#another-machine)
 - `--keep`: `cleanup` leaves the agent open until you name it; see `keep` below
 
-`dispatch` and `send` check that the agent took the task and send it once more when it didn't. A task that still doesn't arrive, or that a dialog stopped, is kept aside and the command exits with code 4; see [the task reaches the agent](agents-and-sessions.md#the-task-reaches-the-agent).
+`dispatch` and `send` check that the agent took the task and send it once more when it didn't. A CLI command such as `/clear` is sent once without the check, and for an agent herdr shows as `unknown` the screen decides and the output says the delivery isn't verified. A task that still doesn't arrive, or that a dialog stopped, is kept aside and the command exits with code 4; see [the task reaches the agent](agents-and-sessions.md#the-task-reaches-the-agent).
 
 Agent names are lowercase, start with a letter, use `a-z`, `0-9`, `_` or `-`, are at most 32 characters, and are unique among open agents.
 
@@ -79,7 +79,7 @@ Agent names are lowercase, start with a letter, use `a-z`, `0-9`, `_` or `-`, ar
 | Command | Description |
 |---|---|
 | `status [--all]` | Each open agent: model, effort, live state, whether its task was delivered (`compito`), whether it's kept (`tenuto`), age and session ID; `--all` includes closed agents |
-| `wait [agent_name…] [--any] [--timeout seconds]` | Waits until the agents stop (default: every open agent, 540 seconds), delivering tasks kept aside; exits with 4 when one waits on a question, 5 when time runs out; see [wait for agents](agents-and-sessions.md#wait-for-agents) |
+| `wait [agent_name…] [--any] [--timeout seconds]` | Waits until the agents stop (default: every open agent, 540 seconds), delivering tasks kept aside (one try each); exits with 4 when one waits on a question, 5 when time runs out; see [wait for agents](agents-and-sessions.md#wait-for-agents) |
 | `answer agent_name --kind question\|permission (--option "text or number" [--text "…"] \| --text "…" \| --keys "down,enter") [--reason "…"] [--yes]` | Answers an agent that waits on a question or a permission request, within the answer policy; checks the selected option on screen before Enter |
 | `costs` | Estimated cost per agent, credits per provider, and advice on where to delegate more or less |
 

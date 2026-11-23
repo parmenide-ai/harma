@@ -88,6 +88,7 @@ export function agentsFromEvents(events) {
           mode: e.mode ?? 'interactive', run_dir: e.run_dir ?? null,
           session_id: e.session_id ?? cur.session_id ?? null, closed_at: null, state: 'open',
           keep: false, pending: null, prompted_at: null,
+          muse_before: e.muse_before ?? [], // Muse sessions already running when it started: never its own
         });
         break;
       case 'session':
@@ -99,7 +100,11 @@ export function agentsFromEvents(events) {
         cur.pending = null; // whatever reached the agent replaces a task kept aside
         break;
       case 'pending':
-        cur.pending = { file: e.file, chars: e.chars, reason: e.reason, at: e.at };
+        cur.pending = { file: e.file, chars: e.chars, reason: e.reason, at: e.at, tried: false };
+        break;
+      case 'undelivered':
+        // harma wait sent the task kept aside and the agent didn't take it: the next try is send --pending.
+        if (cur.pending) cur.pending = { ...cur.pending, tried: true };
         break;
       case 'keep':
         cur.keep = Boolean(e.on);

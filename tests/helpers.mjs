@@ -51,7 +51,7 @@ if (g === 'worktree' && c === 'create') {
   if ((h.worktrees ?? []).some((x) => x.path === path)) return fail('worktree_create_failed', "fatal: '" + path + "' already exists");
   h.ws++; const w = 'w' + h.ws; h.open.push(w); h.tabs[w + ':t0'] = w; h.labels = { ...h.labels, [w + ':t0']: '1' };
   h.paneCwd[w + ':p0'] = path; fs.mkdirSync(path, { recursive: true }); // like git, the checkout exists on disk
-  h.worktrees = [...(h.worktrees ?? []), { path, branch: arg('--branch'), label: arg('--label'), ws: w }];
+  h.worktrees = [...(h.worktrees ?? []), { path, branch: arg('--branch'), base: a.includes('--base') ? arg('--base') : null, label: arg('--label'), ws: w }];
   return ok({ type: 'worktree_created', workspace: { workspace_id: w, label: arg('--label') }, tab: { tab_id: w + ':t0' }, root_pane: { pane_id: w + ':p0', tab_id: w + ':t0' }, worktree: { path, branch: arg('--branch') } });
 }
 // Like herdr: removes the checkout and closes its workspace; the branch stays.
@@ -131,10 +131,12 @@ if (g === 'agent' && c === 'start') {
   if (blocked) return fail('agent_not_ready', 'agent ' + a[2] + ' is blocked during startup and is not ready for prompts');
   return ok({ agent: a[2] });
 }
-if (g === 'agent' && c === 'list') { save(); console.log(JSON.stringify({ result: { agents: h.agents.map(({ args, dialog, ...x }) => x) } })); process.exit(0); }
+// FAKE_LIST_HIDES=name: herdr's listing misses that agent for a moment (agent get still finds it).
+if (g === 'agent' && c === 'list') { save(); console.log(JSON.stringify({ result: { agents: h.agents.filter((x) => x.name !== process.env.FAKE_LIST_HIDES).map(({ args, dialog, ...x }) => x) } })); process.exit(0); }
 if (g === 'agent' && c === 'prompt' && process.env.FAKE_PROMPT_BLOCKED) return fail('agent_blocked', 'agent ' + a[2] + ' is blocked and requires interactive input');
 // FAKE_PROMPT_LOST=n: the first n prompts vanish (the CLI restarts after updating itself).
 // FAKE_PROMPT_NO_ENTER=1: the first prompt is typed but not submitted.
+// FAKE_PROMPT_RESTART_TRUST=1: the first prompt vanishes and the CLI restarts into its folder-trust dialog.
 if (g === 'agent' && c === 'prompt') {
   const ag = h.agents.find((x) => x.name === a[2]); if (!ag) return fail('not_found', 'no agent');
   if (ag.agent_status === 'blocked') return fail('agent_blocked', 'agent ' + a[2] + ' is blocked and requires interactive input');
@@ -142,7 +144,13 @@ if (g === 'agent' && c === 'prompt') {
   // h.loseNext (set by a test): the next prompts vanish too.
   if (h.prompts <= Number(process.env.FAKE_PROMPT_LOST ?? 0) || (h.loseNext > 0 && h.loseNext--)) { h.lost = [...(h.lost ?? []), a[3]]; return ok({ submitted: true }); }
   if (process.env.FAKE_PROMPT_NO_ENTER && h.prompts === 1) { ag.typed = a[3]; return ok({ submitted: true }); }
-  ag.agent_status = process.env.FAKE_AFTER_PROMPT || 'done'; ag.seq = (ag.seq ?? 0) + 1; ag.last_prompt = a[3]; h.delivered = [...(h.delivered ?? []), a[3]];
+  if (process.env.FAKE_PROMPT_RESTART_TRUST && h.prompts === 1) { h.lost = [...(h.lost ?? []), a[3]]; ag.agent_status = 'blocked'; ag.dialog = { sel: 0, path: h.paneCwd[ag.pane_id] || '/x' }; return ok({ submitted: true }); }
+  h.delivered = [...(h.delivered ?? []), a[3]];
+  // /clear runs inside the CLI: no turn, no state change, and the conversation is gone.
+  if (a[3] === '/clear') { ag.said = []; return ok({ submitted: true }); }
+  ag.agent_status = process.env.FAKE_AFTER_PROMPT || 'done'; ag.seq = (ag.seq ?? 0) + 1; ag.last_prompt = a[3]; ag.said = [...(ag.said ?? []), a[3]];
+  // A turn that ended (idle or done) bumps herdr's completion_seq: FAKE_AFTER_PROMPT=idle is a turn too quick to be seen working.
+  if (['idle', 'done'].includes(ag.agent_status)) ag.completed = ag.seq;
   return ok({ submitted: true });
 }
 // The three folder-trust dialogs, as captured from the real CLIs (path wrapped at 40 columns).
@@ -190,7 +198,7 @@ if (g === 'agent' && c === 'send-keys') {
   const ag = h.agents.find((x) => x.name === a[2]); if (!ag) return fail('not_found', 'no agent');
   h.keys = [...(h.keys ?? []), ...a.slice(3)];
   for (const k of a.slice(3)) {
-    if (k === 'enter' && ag.typed) { ag.last_prompt = ag.typed; h.delivered = [...(h.delivered ?? []), ag.typed]; ag.typed = null; ag.agent_status = process.env.FAKE_AFTER_PROMPT || 'done'; ag.seq = (ag.seq ?? 0) + 1; continue; }
+    if (k === 'enter' && ag.typed) { ag.last_prompt = ag.typed; ag.said = [...(ag.said ?? []), ag.typed]; h.delivered = [...(h.delivered ?? []), ag.typed]; ag.typed = null; ag.agent_status = process.env.FAKE_AFTER_PROMPT || 'done'; ag.seq = (ag.seq ?? 0) + 1; continue; }
     if (!ag.dialog) continue;
     const d = DIALOGS[ag.agent];
     if (k === 'down') ag.dialog.sel = Math.min(ag.dialog.sel + 1, d.options.length - 1);
@@ -201,14 +209,15 @@ if (g === 'agent' && c === 'send-keys') {
   }
   return ok({ type: 'ok' });
 }
-if (g === 'agent' && c === 'get') { const ag = h.agents.find((x) => x.name === a[2] || x.pane_id === a[2]); if (!ag) return fail('agent_not_found', 'gone'); return ok({ agent: { name: ag.name, agent_status: ag.agent_status, pane_id: ag.pane_id, state_change_seq: ag.seq ?? 0 } }); }
+if (g === 'agent' && c === 'get') { const ag = h.agents.find((x) => x.name === a[2] || x.pane_id === a[2]); if (!ag) return fail('agent_not_found', 'gone'); return ok({ agent: { name: ag.name, agent_status: ag.agent_status, pane_id: ag.pane_id, state_change_seq: ag.seq ?? 0, completion_seq: ag.completed ?? null } }); }
 if (g === 'agent' && c === 'wait') { const ag = h.agents.find((x) => x.name === a[2]); if (!ag) return fail('agent_not_running', 'gone'); return ok({ agent: { name: ag.name, agent_status: ag.agent_status } }); }
 if (g === 'agent' && c === 'read' && process.env.FAKE_READ_NOT_IDLE && a.includes('recent-unwrapped')) return fail('agent_not_idle', 'agent ' + a[2] + ' is working');
-// A prompt typed but not submitted sits in the input box.
-if (g === 'agent' && c === 'read' && a.includes('visible') && h.agents.find((x) => x.name === a[2])?.typed) {
-  save(); console.log(['  Muse Code 1.4.25', '', '❯ ' + h.agents.find((x) => x.name === a[2]).typed, '', '  muse-wonder-full-1.0 · max'].join(String.fromCharCode(10))); process.exit(0);
+// The screen: what the agent received (its first line, as a TUI echoes a message), then the input box,
+// where a prompt typed but not submitted sits.
+if (g === 'agent' && c === 'read') {
+  const ag = h.agents.find((x) => x.name === a[2]);
+  save(); console.log(['output of ' + a[2] + ' (' + a[a.indexOf('--source') + 1] + ')', ...(ag?.said ?? []).map((t) => '› ' + t.split(String.fromCharCode(10))[0]), '', '❯ ' + (ag?.typed ?? ''), '  footer'].join(String.fromCharCode(10))); process.exit(0);
 }
-if (g === 'agent' && c === 'read') { save(); console.log('output of ' + a[2] + ' (' + a[a.indexOf('--source') + 1] + ')'); process.exit(0); }
 fail('unknown', 'fake herdr: ' + a.join(' '));
 `;
 
