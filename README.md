@@ -54,10 +54,11 @@ harma models && harma credits && harma rank --top 15
 harma select --open --wait
 harma dispatch --name planner --task-type pianificazione --prompt-file brief.md
 harma status
+harma wait
 harma cleanup
 ```
 
-`select --open --wait` opens a screen in a herdr tab where you accept or change the models for each job. `dispatch` exits with code 3 and shows the plan until you agree; the orchestrator then runs it again with `--yes`.
+`select --open --wait` opens a screen in a herdr tab where you accept or change the models for each job. `dispatch` exits with code 3 and shows the plan until you agree; the orchestrator then runs it again with `--yes`. `wait` returns when the agents stop, or as soon as one waits on a question.
 
 ## Documentation
 

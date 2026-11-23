@@ -2,7 +2,7 @@
 
 All notable changes to harma, newest first. Versions follow [semantic versioning](https://semver.org/).
 
-## Unreleased
+## 0.7.0 (2026-11-23)
 
 Agents that don't lose their task, and an orchestrator that doesn't poll:
 
