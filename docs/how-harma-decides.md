@@ -4,7 +4,7 @@ This page explains where harma's numbers come from and how it turns them into pr
 
 ## Intelligence scores
 
-Model intelligence comes from the [Artificial Analysis](https://artificialanalysis.ai/models) Intelligence Index and cost per task, measured separately for each effort level. Harma bundles the controller-models snapshot in `data/catalog.json`.
+Model intelligence comes from the [Artificial Analysis](https://artificialanalysis.ai/models) Intelligence Index and cost per task, measured separately for each effort level. Harma bundles the controller-models v5.0.2 snapshot in `data/catalog.json`. A cost measured at a named effort belongs to that effort.
 
 `harma rank --refresh` downloads current scores and cost per task from the free Artificial Analysis API (`/api/v2/language/models/free`, every page). Harma stores those figures in `~/.config/harma/aa-benchmarks.json` and applies them to the bundled catalog they were fetched for. The bundled catalog supplies the model list, prices and CLI settings. Run the refresh again after a catalog update or when upgrading from the old `catalog.json` cache. The API key is read from `AA_API_KEY`, or from the delegation-kit key file `~/.local/share/delegation-kit/config/artificial-analysis.env` when it exists. A model or effort level without a score stays unknown, and routing leaves it out.
 
