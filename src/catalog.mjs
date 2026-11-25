@@ -60,5 +60,7 @@ export function aaIndex(model, effort) {
 export function aaCost(model, effort) {
   const c = model?.aa?.cost_per_task;
   if (!c) return null;
-  return c[effort] ?? (Object.keys(c).length === 1 ? Object.values(c)[0] : null);
+  if (c[effort] != null) return c[effort];
+  if (Object.keys(c).length === 1) return c.default ?? null;
+  return null;
 }

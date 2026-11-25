@@ -100,6 +100,14 @@ test('rank orders by AA index and leaves unmeasured efforts unknown', () => {
   assert.equal(rows[0].effort, 'max');
   assert.ok(rows[0].index > rows[1].index);
   assert.equal(rows.at(-1).index, null);
+
+  const flash = rankRows(catalog, [
+    { harness: 'claude-zai', model: 'glm-5.3-flash', efforts: ['low', 'max'] },
+  ]);
+  assert.ok(flash.find((row) => row.effort === 'max').cost_per_task > 0);
+  const low = flash.find((row) => row.effort === 'low');
+  assert.equal(low.index, null);
+  assert.equal(low.cost_per_task, null);
 });
 
 test('AA refresh maps "(Max)" variants onto the family and writes the user catalog', async () => {

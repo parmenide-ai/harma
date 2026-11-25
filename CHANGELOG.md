@@ -2,6 +2,11 @@
 
 All notable changes to harma, newest first. Versions follow [semantic versioning](https://semver.org/).
 
+## 0.7.1 (2026-11-25)
+
+- Bundle Artificial Analysis Intelligence Index v5.0.2 scores and benchmark task costs from November 25.
+- Show the benchmark cost of a named effort only at that effort. For example, the GLM-5.3-Flash max cost now stays with max.
+
 ## 0.7.0 (2026-11-23)
 
 Agents that don't lose their task, and an orchestrator that doesn't poll:
